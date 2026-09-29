@@ -132,6 +132,7 @@ namespace rsx
 			mutable rsx::thread* m_thread;
 			RsxDmaControl* m_ctrl = nullptr;
 			const rsx::rsx_iomap_table* m_iotable;
+			u32 m_local_fifo_size = 0; // The local memory size when the command buffer is there
 			u32 m_fifo_pos = 0;
 
 			u32 m_memwatch_addr = 0;

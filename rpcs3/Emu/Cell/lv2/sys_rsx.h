@@ -5,6 +5,12 @@
 
 class cpu_thread;
 
+// sys_rsx_context_allocate's system mode bit for a FIFO whose command buffer is
+// in local memory: GET, PUT and the jump and call targets are then offsets into
+// local memory, not IO offsets. GTA IV 1.00's libgcm asks for it (system mode
+// 0x210) and maps no IO memory before its first commands.
+constexpr u64 SYS_RSX_SYSTEM_MODE_LOCAL_FIFO = 0x200;
+
 struct RsxDriverInfo
 {
 	be_t<u32> version_driver;     // 0x0
