@@ -142,6 +142,16 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 	llvm::MDNode* m_md_unlikely{};
 	llvm::MDNode* m_md_likely{};
 	llvm::MDNode* m_md_spu_memory_domain{};
+
+	// Accurate xfloat on the host's single precision (xf_native): x86 only
+#if defined(ARCH_X64)
+	const bool m_xf_native = g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::accurate;
+#else
+	const bool m_xf_native = false;
+#endif
+
+	// Accurate xfloat's registers as doubles (the path without xf_native)
+	const bool m_xf_double = g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::accurate && !m_xf_native;
 	llvm::MDNode* m_md_spu_context_domain{};
 
 	struct block_info
@@ -767,6 +777,137 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 		const auto z = m_ir->CreateFCmpOLT(a, smin);
 		const auto c = double_as_uint64(m_ir->CreateSelect(n, a, smax));
 		return m_ir->CreateSelect(z, fsplat<f64[4]>(0.).eval(m_ir), uint64_as_double(m_ir->CreateOr(c, s)));
+	}
+
+	// Accurate xfloat on the host's single precision (x86). SPU threads round
+	// toward zero and flush and read denormals as zero (spu_thread::cpu_task),
+	// which is the SPU's single precision: the float result is accurate xfloat's
+	// (the same bits, checked on 60 million cases of each operation) unless a lane
+	// reaches FLT_MAX: an SPU value with exponent 255 (x86 reads it as infinity or
+	// NaN) or an overflow, for which the whole vector takes the double path. A
+	// zero result is made +0, as the double path's clamp does. kind: 0 FA, 1 FS,
+	// 2 FM, 3 FMA, 4 FNMS, 5 FMS.
+	llvm::Value* xf_native_arith(u32 kind, llvm::Value* a, llvm::Value* b, llvm::Value* c = nullptr)
+	{
+		const auto f32v = get_type<f32[4]>();
+
+		// The double path, as accurate xfloat computes it
+		const auto by_double = [&]() -> llvm::Value*
+		{
+			const auto da = xfloat_to_double(m_ir->CreateBitCast(a, get_type<u32[4]>()));
+			const auto db = xfloat_to_double(m_ir->CreateBitCast(b, get_type<u32[4]>()));
+			const auto dc = c ? xfloat_to_double(m_ir->CreateBitCast(c, get_type<u32[4]>())) : nullptr;
+			const auto f64v = get_type<f64[4]>();
+			const auto fmuladd = [&](llvm::Value* x, llvm::Value* y, llvm::Value* z)
+			{
+				return m_ir->CreateIntrinsic(llvm::Intrinsic::fmuladd, {f64v}, {x, y, z});
+			};
+
+			llvm::Value* r{};
+
+			switch (kind)
+			{
+			case 0: r = m_ir->CreateFAdd(da, db); break;
+			case 1: r = m_ir->CreateFSub(da, db); break;
+			case 2: r = m_ir->CreateFMul(da, db); break;
+			case 3: r = fmuladd(da, db, dc); break;
+			case 4: r = fmuladd(m_ir->CreateFNeg(da), db, dc); break;
+			default: r = fmuladd(da, db, m_ir->CreateFNeg(dc)); break;
+			}
+
+			return m_ir->CreateBitCast(double_to_xfloat(xfloat_in_double(r)), f32v);
+		};
+
+		// Constants only: the double path (LLVM would fold the float operation
+		// rounding to nearest)
+		if (llvm::isa<llvm::Constant>(a) && llvm::isa<llvm::Constant>(b) && (!c || llvm::isa<llvm::Constant>(c)))
+		{
+			return by_double();
+		}
+
+		llvm::Value* r{};
+
+		switch (kind)
+		{
+		case 0: r = m_ir->CreateFAdd(a, b); break;
+		case 1: r = m_ir->CreateFSub(a, b); break;
+		case 2: r = m_ir->CreateFMul(a, b); break;
+		case 3: r = m_ir->CreateIntrinsic(llvm::Intrinsic::fma, {f32v}, {a, b, c}); break;
+		case 4: r = m_ir->CreateIntrinsic(llvm::Intrinsic::fma, {f32v}, {m_ir->CreateFNeg(a), b, c}); break;
+		default: r = m_ir->CreateIntrinsic(llvm::Intrinsic::fma, {f32v}, {a, b, m_ir->CreateFNeg(c)}); break;
+		}
+
+		const auto s32v = get_type<s32[4]>();
+		const auto bits = m_ir->CreateAnd(m_ir->CreateBitCast(r, s32v), llvm::ConstantInt::get(s32v, 0x7fffffff));
+		const auto big = m_ir->CreateICmpSGT(bits, llvm::ConstantInt::get(s32v, 0x7f7ffffe));
+		const auto any = m_ir->CreateICmpNE(m_ir->CreateBitCast(big, m_ir->getIntNTy(4)), m_ir->getIntN(4, 0));
+
+		// -0 + +0 is +0 rounding toward zero
+		const auto fixed = m_ir->CreateFAdd(r, llvm::Constant::getNullValue(f32v));
+
+		const auto here = m_ir->GetInsertBlock();
+		const auto slow = llvm::BasicBlock::Create(m_context, "__xf_double", m_function);
+		const auto done = llvm::BasicBlock::Create(m_context, "__xf_done", m_function);
+		m_ir->CreateCondBr(any, slow, done, m_md_unlikely);
+		m_ir->SetInsertPoint(slow);
+		const auto doubled = by_double();
+		const auto slow_end = m_ir->GetInsertBlock();
+		m_ir->CreateBr(done);
+		m_ir->SetInsertPoint(done);
+		const auto phi = m_ir->CreatePHI(f32v, 2);
+		phi->addIncoming(fixed, here);
+		phi->addIncoming(doubled, slow_end);
+		return phi;
+	}
+
+	// The comparisons: natively unless a lane of either operand has exponent 255
+	// (an SPU value x86 reads as infinity or NaN), then as accurate xfloat's
+	// doubles. Denormals read as zero on either path. kind: 0 FCGT, 1 FCMGT,
+	// 2 FCEQ, 3 FCMEQ.
+	llvm::Value* xf_native_cmp(u32 kind, llvm::Value* a, llvm::Value* b)
+	{
+		const auto s32v = get_type<s32[4]>();
+
+		const auto compare = [&](llvm::Value* x, llvm::Value* y) -> llvm::Value*
+		{
+			if (kind & 1)
+			{
+				x = m_ir->CreateUnaryIntrinsic(llvm::Intrinsic::fabs, x);
+				y = m_ir->CreateUnaryIntrinsic(llvm::Intrinsic::fabs, y);
+			}
+
+			return m_ir->CreateSExt(kind < 2 ? m_ir->CreateFCmpOGT(x, y) : m_ir->CreateFCmpOEQ(x, y), s32v);
+		};
+
+		const auto by_double = [&]()
+		{
+			return compare(xfloat_to_double(m_ir->CreateBitCast(a, get_type<u32[4]>())), xfloat_to_double(m_ir->CreateBitCast(b, get_type<u32[4]>())));
+		};
+
+		if (llvm::isa<llvm::Constant>(a) && llvm::isa<llvm::Constant>(b))
+		{
+			return by_double();
+		}
+
+		const auto exp = llvm::ConstantInt::get(s32v, 0x7f800000);
+		const auto ea = m_ir->CreateICmpEQ(m_ir->CreateAnd(m_ir->CreateBitCast(a, s32v), exp), exp);
+		const auto eb = m_ir->CreateICmpEQ(m_ir->CreateAnd(m_ir->CreateBitCast(b, s32v), exp), exp);
+		const auto any = m_ir->CreateICmpNE(m_ir->CreateBitCast(m_ir->CreateOr(ea, eb), m_ir->getIntNTy(4)), m_ir->getIntN(4, 0));
+		const auto fast = compare(a, b);
+
+		const auto here = m_ir->GetInsertBlock();
+		const auto slow = llvm::BasicBlock::Create(m_context, "__xf_double_cmp", m_function);
+		const auto done = llvm::BasicBlock::Create(m_context, "__xf_cmp_done", m_function);
+		m_ir->CreateCondBr(any, slow, done, m_md_unlikely);
+		m_ir->SetInsertPoint(slow);
+		const auto doubled = by_double();
+		const auto slow_end = m_ir->GetInsertBlock();
+		m_ir->CreateBr(done);
+		m_ir->SetInsertPoint(done);
+		const auto phi = m_ir->CreatePHI(s32v, 2);
+		phi->addIncoming(fast, here);
+		phi->addIncoming(doubled, slow_end);
+		return phi;
 	}
 
 	// Expand 32-bit mask for xfloat values to 64-bit, 29 least significant bits are always zero
@@ -2623,7 +2764,7 @@ public:
 						if (src > 0x40000)
 						{
 							// Use the xfloat hint to create 256-bit (4x double) PHI
-							llvm::Type* type = g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::accurate && bb.reg_maybe_xf.test_unsafe(i) ? get_type<f64[4]>() : get_reg_type(i);
+							llvm::Type* type = m_xf_double && bb.reg_maybe_xf.test_unsafe(i) ? get_type<f64[4]>() : get_reg_type(i);
 
 							const auto _phi = m_ir->CreatePHI(type, ::size32(bb.preds), fmt::format("phi0x%05x_r%u", baddr, i));
 							m_block->phi[i] = _phi;
@@ -3034,7 +3175,7 @@ public:
 				{
 					for (u32 i = 0; i < s_reg_max; i++)
 					{
-						llvm::Type* type = g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::accurate && bb.reg_maybe_xf.test_unsafe(i) ? get_type<f64[4]>() : get_reg_type(i);
+						llvm::Type* type = m_xf_double && bb.reg_maybe_xf.test_unsafe(i) ? get_type<f64[4]>() : get_reg_type(i);
 
 						if (i < m_reduced_loop_info->loop_dicts.size() && (m_reduced_loop_info->loop_dicts.test(i) || m_reduced_loop_info->loop_writes.test(i)))
 						{
@@ -8098,6 +8239,13 @@ public:
 
 	void FCGT(spu_opcode_t op)
 	{
+		if (m_xf_native)
+		{
+			const auto [a, b] = get_vrs<f32[4]>(op.ra, op.rb);
+			set_vr(op.rt, value<s32[4]>(xf_native_cmp(0, a.value, b.value)));
+			return;
+		}
+
 		if (g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::accurate)
 		{
 			set_vr(op.rt, sext<s32[4]>(fcmp_ord(get_vr<f64[4]>(op.ra) > get_vr<f64[4]>(op.rb))));
@@ -8194,6 +8342,13 @@ public:
 
 	void FCMGT(spu_opcode_t op)
 	{
+		if (m_xf_native)
+		{
+			const auto [a, b] = get_vrs<f32[4]>(op.ra, op.rb);
+			set_vr(op.rt, value<s32[4]>(xf_native_cmp(1, a.value, b.value)));
+			return;
+		}
+
 		if (g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::accurate)
 		{
 			set_vr(op.rt, sext<s32[4]>(fcmp_ord(fabs(get_vr<f64[4]>(op.ra)) > fabs(get_vr<f64[4]>(op.rb)))));
@@ -8261,6 +8416,13 @@ public:
 
 	void FA(spu_opcode_t op)
 	{
+		if (m_xf_native)
+		{
+			const auto [a, b] = get_vrs<f32[4]>(op.ra, op.rb);
+			set_vr(op.rt, value<f32[4]>(xf_native_arith(0, a.value, b.value)));
+			return;
+		}
+
 		if (g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::accurate)
 		{
 			set_vr(op.rt, get_vr<f64[4]>(op.ra) + get_vr<f64[4]>(op.rb));
@@ -8280,6 +8442,13 @@ public:
 
 	void FS(spu_opcode_t op)
 	{
+		if (m_xf_native)
+		{
+			const auto [a, b] = get_vrs<f32[4]>(op.ra, op.rb);
+			set_vr(op.rt, value<f32[4]>(xf_native_arith(1, a.value, b.value)));
+			return;
+		}
+
 		if (g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::accurate)
 		{
 			set_vr(op.rt, get_vr<f64[4]>(op.ra) - get_vr<f64[4]>(op.rb));
@@ -8310,6 +8479,13 @@ public:
 
 	void FM(spu_opcode_t op)
 	{
+		if (m_xf_native)
+		{
+			const auto [a, b] = get_vrs<f32[4]>(op.ra, op.rb);
+			set_vr(op.rt, value<f32[4]>(xf_native_arith(2, a.value, b.value)));
+			return;
+		}
+
 		if (g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::accurate)
 		{
 			set_vr(op.rt, get_vr<f64[4]>(op.ra) * get_vr<f64[4]>(op.rb));
@@ -8472,6 +8648,13 @@ public:
 
 	void FCEQ(spu_opcode_t op)
 	{
+		if (m_xf_native)
+		{
+			const auto [a, b] = get_vrs<f32[4]>(op.ra, op.rb);
+			set_vr(op.rt, value<s32[4]>(xf_native_cmp(2, a.value, b.value)));
+			return;
+		}
+
 		if (g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::accurate)
 		{
 			set_vr(op.rt, sext<s32[4]>(fcmp_ord(get_vr<f64[4]>(op.ra) == get_vr<f64[4]>(op.rb))));
@@ -8521,6 +8704,13 @@ public:
 
 	void FCMEQ(spu_opcode_t op)
 	{
+		if (m_xf_native)
+		{
+			const auto [a, b] = get_vrs<f32[4]>(op.ra, op.rb);
+			set_vr(op.rt, value<s32[4]>(xf_native_cmp(3, a.value, b.value)));
+			return;
+		}
+
 		if (g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::accurate)
 		{
 			set_vr(op.rt, sext<s32[4]>(fcmp_ord(fabs(get_vr<f64[4]>(op.ra)) == fabs(get_vr<f64[4]>(op.rb)))));
@@ -8611,6 +8801,13 @@ public:
 
 	void FNMS(spu_opcode_t op)
 	{
+		if (m_xf_native)
+		{
+			const auto [a, b, c] = get_vrs<f32[4]>(op.ra, op.rb, op.rc);
+			set_vr(op.rt4, value<f32[4]>(xf_native_arith(4, a.value, b.value, c.value)));
+			return;
+		}
+
 		// See FMA.
 		if (g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::accurate)
 		{
@@ -8653,6 +8850,13 @@ public:
 
 	void FMA(spu_opcode_t op)
 	{
+		if (m_xf_native)
+		{
+			const auto [a, b, c] = get_vrs<f32[4]>(op.ra, op.rb, op.rc);
+			set_vr(op.rt4, value<f32[4]>(xf_native_arith(3, a.value, b.value, c.value)));
+			return;
+		}
+
 		// Hardware FMA produces the same result as multiple + add on the limited double range (xfloat).
 		if (g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::accurate)
 		{
@@ -8970,6 +9174,13 @@ public:
 
 	void FMS(spu_opcode_t op)
 	{
+		if (m_xf_native)
+		{
+			const auto [a, b, c] = get_vrs<f32[4]>(op.ra, op.rb, op.rc);
+			set_vr(op.rt4, value<f32[4]>(xf_native_arith(5, a.value, b.value, c.value)));
+			return;
+		}
+
 		// See FMA.
 		if (g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::accurate)
 		{

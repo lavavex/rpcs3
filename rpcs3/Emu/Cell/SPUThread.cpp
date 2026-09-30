@@ -1486,6 +1486,13 @@ void spu_thread::cpu_task()
 
 	std::fesetround(FE_TOWARDZERO);
 
+#if defined(ARCH_X64)
+	// The SSE rounding too, whatever the C library's fesetround sets: accurate
+	// xfloat's single-precision code (SPULLVMRecompiler.cpp, xf_native_arith)
+	// is the SPU's only rounding toward zero
+	_MM_SET_ROUNDING_MODE(_MM_ROUND_TOWARD_ZERO);
+#endif
+
 	gv_set_zeroing_denormals();
 
 	g_tls_log_prefix = []
