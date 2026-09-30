@@ -143,29 +143,20 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 	llvm::MDNode* m_md_likely{};
 	llvm::MDNode* m_md_spu_memory_domain{};
 
+	// Testing only (/app0/xf-double.txt): accurate xfloat on doubles throughout,
+	// as upstream RPCS3 makes it, to measure what xf_native saves
+	static bool xf_double()
+	{
+		static const bool s_on = fs::is_file("/app0/xf-double.txt");
+		return s_on;
+	}
+
 	// Accurate xfloat on the host's single precision (xf_native): x86 only
 #if defined(ARCH_X64)
-	const bool m_xf_native = g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::accurate;
+	const bool m_xf_native = g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::accurate && !xf_double();
 #else
 	const bool m_xf_native = false;
 #endif
-
-	// Testing only (/app0/xf-nocheck.txt): xf_native's operations without the
-	// check for FLT_MAX lanes, the zero fixup or the counts. Not accurate: it
-	// measures what the check costs.
-	static bool xf_nocheck()
-	{
-		static const bool s_on = fs::is_file("/app0/xf-nocheck.txt");
-		return s_on;
-	}
-
-	// Testing only (/app0/xf-nobranch.txt): the check made and stored, with no
-	// branch (not accurate: it measures the branch's cost apart from the check's)
-	static bool xf_nobranch()
-	{
-		static const bool s_on = fs::is_file("/app0/xf-nobranch.txt");
-		return s_on;
-	}
 
 	// The metadata kind tagging accurate xfloat's raw float results (xf_settle)
 	u32 m_md_xf_raw_kind = 0;
@@ -889,22 +880,10 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 			break;
 		}
 
-		if (xf_nocheck())
-		{
-			return r;
-		}
-
 		const auto s32v = get_type<s32[4]>();
 		const auto bits = m_ir->CreateAnd(m_ir->CreateBitCast(r, s32v), llvm::ConstantInt::get(s32v, 0x7fffffff));
 		const auto big = m_ir->CreateOr(m_ir->CreateICmpSGT(bits, llvm::ConstantInt::get(s32v, 0x7f7ffffe)),
 			m_ir->CreateICmpEQ(m_ir->CreateBitCast(r, s32v), llvm::ConstantInt::get(s32v, 0x80000000u)));
-
-		if (xf_nobranch())
-		{
-			const auto any = m_ir->CreateICmpNE(m_ir->CreateBitCast(big, m_ir->getIntNTy(4)), m_ir->getIntN(4, 0));
-			m_ir->CreateStore(m_ir->CreateZExt(any, get_type<u32>()), spu_ptr(&spu_thread::xf_sink))->setVolatile(true);
-			return r;
-		}
 
 		if (m_xf_region.active)
 		{
