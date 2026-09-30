@@ -3710,7 +3710,11 @@ public:
 						const auto itype = g_spu_itype.decode(op);
 						const bool plain = m_inst_attrs[(m_pos - start) / 4] == inst_attr::none;
 						const bool is_load = itype == spu_itype::LQD || itype == spu_itype::LQX || itype == spu_itype::LQA || itype == spu_itype::LQR;
-						const bool fits = plain && ((itype & spu_itype::floating) || (itype & spu_itype::pure) || is_load);
+
+						// No-operations and hints emit nothing (scheduled SPU code is full of them)
+						const bool is_nothing = itype == spu_itype::LNOP || itype == spu_itype::NOP || itype == spu_itype::HBR || itype == spu_itype::HBRA ||
+							itype == spu_itype::HBRR || itype == spu_itype::MFSPR || itype == spu_itype::MTSPR;
+						const bool fits = plain && ((itype & spu_itype::floating) || (itype & spu_itype::pure) || is_load || is_nothing);
 
 						if (m_xf_region.active && !fits)
 						{
