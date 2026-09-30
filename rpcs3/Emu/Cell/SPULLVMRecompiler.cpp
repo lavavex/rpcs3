@@ -150,6 +150,15 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 	const bool m_xf_native = false;
 #endif
 
+	// Testing only (/app0/xf-nocheck.txt): xf_native's operations without the
+	// check for FLT_MAX lanes, the zero fixup or the counts. Not accurate: it
+	// measures what the check costs.
+	static bool xf_nocheck()
+	{
+		static const bool s_on = fs::is_file("/app0/xf-nocheck.txt");
+		return s_on;
+	}
+
 	// Accurate xfloat's registers as doubles (the path without xf_native)
 	const bool m_xf_double = g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::accurate && !m_xf_native;
 	llvm::MDNode* m_md_spu_context_domain{};
@@ -835,6 +844,11 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 		case 3: r = m_ir->CreateIntrinsic(llvm::Intrinsic::fma, {f32v}, {a, b, c}); break;
 		case 4: r = m_ir->CreateIntrinsic(llvm::Intrinsic::fma, {f32v}, {m_ir->CreateFNeg(a), b, c}); break;
 		default: r = m_ir->CreateIntrinsic(llvm::Intrinsic::fma, {f32v}, {a, b, m_ir->CreateFNeg(c)}); break;
+		}
+
+		if (xf_nocheck())
+		{
+			return r;
 		}
 
 		const auto s32v = get_type<s32[4]>();
