@@ -151,6 +151,15 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 		return s_on;
 	}
 
+	// Testing only (/app0/xf-nocheck.txt): xf_native's operations without their
+	// checks (never the double path), to measure what the checks cost; not
+	// accurate xfloat
+	static bool xf_nocheck()
+	{
+		static const bool s_on = fs::is_file("/app0/xf-nocheck.txt");
+		return s_on;
+	}
+
 	// Accurate xfloat on the host's single precision (xf_native): x86 only
 #if defined(ARCH_X64)
 	const bool m_xf_native = g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::accurate && !xf_double();
@@ -880,6 +889,11 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 			break;
 		}
 
+		if (xf_nocheck())
+		{
+			return r;
+		}
+
 		const auto s32v = get_type<s32[4]>();
 		const auto bits = m_ir->CreateAnd(m_ir->CreateBitCast(r, s32v), llvm::ConstantInt::get(s32v, 0x7fffffff));
 		const auto big = m_ir->CreateOr(m_ir->CreateICmpSGT(bits, llvm::ConstantInt::get(s32v, 0x7f7ffffe)),
@@ -1107,6 +1121,11 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 			m_ir->CreateICmpEQ(m_ir->CreateAnd(m_ir->CreateBitCast(b, s32v), exp), exp));
 
 		const auto fast = compare(a, b);
+
+		if (xf_nocheck())
+		{
+			return fast;
+		}
 
 		if (m_xf_region.active)
 		{
