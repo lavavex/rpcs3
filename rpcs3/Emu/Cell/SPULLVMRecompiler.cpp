@@ -186,6 +186,9 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 		u32 start = 0;
 		llvm::Value* acc = nullptr;
 		std::array<llvm::Value*, s_reg_max> regs{};
+
+		// Registers the region sets: stored to the context at its end
+		std::bitset<s_reg_max> written{};
 	};
 
 	xf_region_t m_xf_region;
@@ -969,6 +972,7 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 		if (!region.acc || llvm_has_terminator(m_ir->GetInsertBlock()))
 		{
 			region.acc = nullptr;
+			xf_region_store();
 			return;
 		}
 
@@ -1052,8 +1056,42 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 			phi->addIncoming(from_fast[i], fast_end);
 			phi->addIncoming(from_replay[i], replay_end);
 			m_block->reg[i] = phi;
-			m_block->store[i] = nullptr;
 		}
+
+		xf_region_store();
+	}
+
+	// The registers the region set, stored to the context (as set_reg_fixed does)
+	void xf_region_store()
+	{
+		for (u32 i = 0; i < s_reg_max; i++)
+		{
+			if (!m_xf_region.written.test(i))
+			{
+				continue;
+			}
+
+			const auto value = ::at32(m_block->reg, i);
+
+			if (!value || m_block->block_wide_reg_store_elimination || (m_finfo && m_finfo->fn && (i <= 3 || (i >= s_reg_80 && i <= s_reg_127))))
+			{
+				continue;
+			}
+
+			auto& _store = m_block->store[i];
+
+			if (_store && m_block->store_context_last_id[i] == m_block->store_context_ctr[i])
+			{
+				_store->eraseFromParent();
+			}
+
+			_store = m_ir->CreateStore(value->getType() == get_type<f64[4]>() ? double_to_xfloat(value) : bitcast(xf_settle(value), get_reg_type(i)), init_reg_fixed(i));
+			spu_context_attr(_store);
+			m_block->store_context_last_id[i] = m_block->store_context_ctr[i];
+			m_block->store_context_first_id[i] = std::min<usz>(m_block->store_context_first_id[i], m_block->store_context_ctr[i]);
+		}
+
+		m_xf_region.written.reset();
 	}
 
 	// The comparisons: natively unless a lane of either operand has exponent 255
@@ -1150,6 +1188,14 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 			// Load register value if necessary
 			reg = m_finfo && m_finfo->load[index] ? m_finfo->load[index] : m_ir->CreateLoad(get_reg_type(index), init_reg_fixed(index));
 			spu_context_attr(reg);
+
+			// Accurate xfloat's region: the value it began with (its fast way may
+			// store the register before the region is made again, which must not
+			// load what that store left)
+			if (m_xf_region.active && !m_xf_region.replaying && !::at32(m_xf_region.regs, index))
+			{
+				::at32(m_xf_region.regs, index) = reg;
+			}
 		}
 
 		if (reg->getType() == get_type<f64[4]>())
@@ -1350,6 +1396,15 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 #endif
 
 			::at32(m_block->reg, index) = saved_value;
+
+			// Inside accurate xfloat's region (either way) the context is not
+			// written: the region's end stores what it set, so the region made
+			// again reads the context it began with
+			if (m_xf_region.active || m_xf_region.replaying)
+			{
+				m_xf_region.written.set(index);
+				return;
+			}
 		}
 
 		// Get register location
@@ -1357,9 +1412,8 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 
 		auto& _store = *(m_block ? &m_block->store[index] : &dummy);
 
-		// Erase previous dead store instruction if necessary (not while accurate
-		// xfloat's region is made again: the other way keeps its stores)
-		if (_store && !m_xf_region.replaying)
+		// Erase previous dead store instruction if necessary
+		if (_store)
 		{
 			if (m_block->store_context_last_id[index] == m_block->store_context_ctr[index])
 			{
@@ -3669,6 +3723,7 @@ public:
 							m_xf_region.active = true;
 							m_xf_region.start = m_pos;
 							m_xf_region.regs = m_block->reg;
+							m_xf_region.written.reset();
 						}
 					}
 
