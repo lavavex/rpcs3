@@ -159,6 +159,14 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 		return s_on;
 	}
 
+	// Testing only (/app0/xf-nobranch.txt): the check made and stored, with no
+	// branch (not accurate: it measures the branch's cost apart from the check's)
+	static bool xf_nobranch()
+	{
+		static const bool s_on = fs::is_file("/app0/xf-nobranch.txt");
+		return s_on;
+	}
+
 	// The metadata kind tagging accurate xfloat's raw float results (xf_settle)
 	u32 m_md_xf_raw_kind = 0;
 
@@ -861,6 +869,12 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 		const auto bits = m_ir->CreateAnd(m_ir->CreateBitCast(r, s32v), llvm::ConstantInt::get(s32v, 0x7fffffff));
 		const auto big = m_ir->CreateICmpSGT(bits, llvm::ConstantInt::get(s32v, 0x7f7ffffe));
 		const auto any = m_ir->CreateICmpNE(m_ir->CreateBitCast(big, m_ir->getIntNTy(4)), m_ir->getIntN(4, 0));
+
+		if (xf_nobranch())
+		{
+			m_ir->CreateStore(m_ir->CreateZExt(any, get_type<u32>()), spu_ptr(&spu_thread::xf_sink))->setVolatile(true);
+			return r;
+		}
 
 		const auto here = m_ir->GetInsertBlock();
 		const auto slow = llvm::BasicBlock::Create(m_context, "__xf_double", m_function);

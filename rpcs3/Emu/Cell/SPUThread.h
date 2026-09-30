@@ -795,6 +795,10 @@ public:
 	u64 block_recover = 0;
 	u64 block_failure = 0;
 
+	// Testing (SPULLVMRecompiler.cpp, xf_nobranch): accurate xfloat's checks
+	// written here instead of branching on them
+	u32 xf_sink = 0;
+
 	rpcs3::hypervisor_context_t hv_ctx; // NOTE: The offset within the class must be within the first 1MiB
 
 	u64 ftx = 0; // Failed transactions
