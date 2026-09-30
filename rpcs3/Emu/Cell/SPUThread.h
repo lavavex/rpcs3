@@ -792,10 +792,6 @@ public:
 	std::unique_ptr<class spu_recompiler_base> jit; // Recompiler instance
 
 	u64 block_counter = 0;
-
-	// Testing: accurate xfloat operations made on floats, and on the double path (SPULLVMRecompiler.cpp, xf_native_arith)
-
-	u64 xf_counts[2]{};
 	u64 block_recover = 0;
 	u64 block_failure = 0;
 

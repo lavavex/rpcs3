@@ -159,6 +159,12 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 		return s_on;
 	}
 
+	// The metadata kind tagging accurate xfloat's raw float results (xf_settle)
+	u32 m_md_xf_raw_kind = 0;
+
+	// Set while xf_native's operations read their operands: they take raw results
+	bool m_xf_reading_raw = false;
+
 	// Accurate xfloat's registers as doubles (the path without xf_native)
 	const bool m_xf_double = g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::accurate && !m_xf_native;
 	llvm::MDNode* m_md_spu_context_domain{};
@@ -856,32 +862,45 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 		const auto big = m_ir->CreateICmpSGT(bits, llvm::ConstantInt::get(s32v, 0x7f7ffffe));
 		const auto any = m_ir->CreateICmpNE(m_ir->CreateBitCast(big, m_ir->getIntNTy(4)), m_ir->getIntN(4, 0));
 
-		// -0 + +0 is +0 rounding toward zero
-		const auto fixed = m_ir->CreateFAdd(r, llvm::Constant::getNullValue(f32v));
-
-		// Testing: the thread's counts of both paths
-		const auto count = [&](u32 index)
-		{
-			const auto ptr = spu_ptr(&spu_thread::xf_counts, index);
-			m_ir->CreateStore(m_ir->CreateAdd(m_ir->CreateLoad(get_type<u64>(), ptr), m_ir->getInt64(1)), ptr);
-		};
-
-		count(0);
-
 		const auto here = m_ir->GetInsertBlock();
 		const auto slow = llvm::BasicBlock::Create(m_context, "__xf_double", m_function);
 		const auto done = llvm::BasicBlock::Create(m_context, "__xf_done", m_function);
 		m_ir->CreateCondBr(any, slow, done, m_md_unlikely);
 		m_ir->SetInsertPoint(slow);
-		count(1);
 		const auto doubled = by_double();
 		const auto slow_end = m_ir->GetInsertBlock();
 		m_ir->CreateBr(done);
 		m_ir->SetInsertPoint(done);
 		const auto phi = m_ir->CreatePHI(f32v, 2);
-		phi->addIncoming(fixed, here);
+		phi->addIncoming(r, here);
 		phi->addIncoming(doubled, slow_end);
+
+		// A zero may be -0 until the value leaves the float operations (xf_settle)
+		phi->setMetadata(m_md_xf_raw_kind, llvm::MDNode::get(m_context, {}));
 		return phi;
+	}
+
+	// An accurate xfloat result on floats may hold -0, which the SPU makes +0: a
+	// float operation reads it the same (-0 and +0 differ only in a zero
+	// result, which is settled in turn), but anything else reads the bits, so
+	// the value is settled (-0 + +0 is +0 rounding toward zero) where it goes
+	// elsewhere: read as another type, stored to the context, or passed to
+	// another block. Adding zero to anything else would flush denormal bit
+	// patterns, so only results tagged by xf_native_arith are touched.
+	bool xf_is_raw(llvm::Value* value) const
+	{
+		const auto inst = llvm::dyn_cast_or_null<llvm::Instruction>(value);
+		return inst && m_md_xf_raw_kind && inst->getMetadata(m_md_xf_raw_kind);
+	}
+
+	llvm::Value* xf_settle(llvm::Value* value)
+	{
+		if (!xf_is_raw(value))
+		{
+			return value;
+		}
+
+		return m_ir->CreateFAdd(value, llvm::Constant::getNullValue(value->getType()));
 	}
 
 	// The comparisons: natively unless a lane of either operand has exponent 255
@@ -979,6 +998,16 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 			}
 
 			return bitcast(double_to_xfloat(reg), type);
+		}
+
+		if (type != reg->getType() || !m_xf_reading_raw)
+		{
+			// Read by anything but xf_native's operations: a raw xfloat result is
+			// settled (FREST, FI or FESD read the sign of a zero)
+			if (const auto settled = xf_settle(reg); settled != reg)
+			{
+				return type == get_type<f64[4]>() ? xfloat_to_double(bitcast<u32[4]>(settled)) : bitcast(settled, type);
+			}
 		}
 
 		if (type == get_type<f64[4]>())
@@ -1201,7 +1230,7 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 		}
 
 		// Write register to the context
-		_store = m_ir->CreateStore(is_xfloat ? double_to_xfloat(saved_value) : bitcast(value, get_reg_type(index)), addr);
+		_store = m_ir->CreateStore(is_xfloat ? double_to_xfloat(saved_value) : bitcast(xf_settle(value), get_reg_type(index)), addr);
 
 		spu_context_attr(_store);
 	}
@@ -1227,7 +1256,7 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 			const auto saved_value = is_xfloat && fixup ? xfloat_in_double(value) : value;
 
 			// Store value
-			m_ir->CreateStore(is_xfloat ? double_to_xfloat(saved_value) : m_ir->CreateBitCast(value, get_type<u32[4]>()), init_vr(index));
+			m_ir->CreateStore(is_xfloat ? double_to_xfloat(saved_value) : m_ir->CreateBitCast(xf_settle(value), get_type<u32[4]>()), init_vr(index));
 			return;
 		}
 
@@ -1767,6 +1796,8 @@ public:
 		if (!m_spurt)
 		{
 			m_spurt = &g_fxo->get<spu_runtime>();
+
+			m_md_xf_raw_kind = m_context.getMDKindID("spu.xf.raw");
 
 			if (static atomic_t<bool> s_logged{}; !s_logged.exchange(true))
 			{
@@ -2807,6 +2838,15 @@ public:
 								{
 									auto& value = bfound->second.reg[i];
 
+									if (xf_is_raw(value))
+									{
+										// Settled where it leaves its block
+										const auto cblock = m_ir->GetInsertBlock();
+										m_ir->SetInsertPoint(bfound->second.block_end->getTerminator());
+										value = xf_settle(value);
+										m_ir->SetInsertPoint(cblock);
+									}
+
 									if (!value || value->getType() != _phi->getType())
 									{
 										const auto regptr = init_reg_fixed(i);
@@ -3216,7 +3256,7 @@ public:
 								value = get_reg_fixed(i, type);
 							}
 
-							reduced_loop_init_regs[i] = value;
+							reduced_loop_init_regs[i] = xf_settle(value);
 						}
 						else if (i < m_reduced_loop_info->loop_dicts.size() && m_reduced_loop_info->loop_args.test(i))
 						{
@@ -3311,7 +3351,7 @@ public:
 							if (auto phi = reduced_loop_phi_nodes[i])
 							{
 								const auto type = phi->getType() == get_type<f64[4]>() ? get_type<f64[4]>() : get_reg_type(i);
-								block_reg_results[i] = ensure(get_reg_fixed(i, type));
+								block_reg_results[i] = xf_settle(ensure(get_reg_fixed(i, type)));
 								phi->addIncoming(block_reg_results[i], block_inner);
 							}
 						}
@@ -8270,7 +8310,9 @@ public:
 	{
 		if (m_xf_native)
 		{
+			m_xf_reading_raw = true;
 			const auto [a, b] = get_vrs<f32[4]>(op.ra, op.rb);
+			m_xf_reading_raw = false;
 			set_vr(op.rt, value<s32[4]>(xf_native_cmp(0, a.value, b.value)));
 			return;
 		}
@@ -8373,7 +8415,9 @@ public:
 	{
 		if (m_xf_native)
 		{
+			m_xf_reading_raw = true;
 			const auto [a, b] = get_vrs<f32[4]>(op.ra, op.rb);
+			m_xf_reading_raw = false;
 			set_vr(op.rt, value<s32[4]>(xf_native_cmp(1, a.value, b.value)));
 			return;
 		}
@@ -8447,7 +8491,9 @@ public:
 	{
 		if (m_xf_native)
 		{
+			m_xf_reading_raw = true;
 			const auto [a, b] = get_vrs<f32[4]>(op.ra, op.rb);
+			m_xf_reading_raw = false;
 			set_vr(op.rt, value<f32[4]>(xf_native_arith(0, a.value, b.value)));
 			return;
 		}
@@ -8473,7 +8519,9 @@ public:
 	{
 		if (m_xf_native)
 		{
+			m_xf_reading_raw = true;
 			const auto [a, b] = get_vrs<f32[4]>(op.ra, op.rb);
+			m_xf_reading_raw = false;
 			set_vr(op.rt, value<f32[4]>(xf_native_arith(1, a.value, b.value)));
 			return;
 		}
@@ -8510,7 +8558,9 @@ public:
 	{
 		if (m_xf_native)
 		{
+			m_xf_reading_raw = true;
 			const auto [a, b] = get_vrs<f32[4]>(op.ra, op.rb);
+			m_xf_reading_raw = false;
 			set_vr(op.rt, value<f32[4]>(xf_native_arith(2, a.value, b.value)));
 			return;
 		}
@@ -8679,7 +8729,9 @@ public:
 	{
 		if (m_xf_native)
 		{
+			m_xf_reading_raw = true;
 			const auto [a, b] = get_vrs<f32[4]>(op.ra, op.rb);
+			m_xf_reading_raw = false;
 			set_vr(op.rt, value<s32[4]>(xf_native_cmp(2, a.value, b.value)));
 			return;
 		}
@@ -8735,7 +8787,9 @@ public:
 	{
 		if (m_xf_native)
 		{
+			m_xf_reading_raw = true;
 			const auto [a, b] = get_vrs<f32[4]>(op.ra, op.rb);
+			m_xf_reading_raw = false;
 			set_vr(op.rt, value<s32[4]>(xf_native_cmp(3, a.value, b.value)));
 			return;
 		}
@@ -8832,7 +8886,9 @@ public:
 	{
 		if (m_xf_native)
 		{
+			m_xf_reading_raw = true;
 			const auto [a, b, c] = get_vrs<f32[4]>(op.ra, op.rb, op.rc);
+			m_xf_reading_raw = false;
 			set_vr(op.rt4, value<f32[4]>(xf_native_arith(4, a.value, b.value, c.value)));
 			return;
 		}
@@ -8881,7 +8937,9 @@ public:
 	{
 		if (m_xf_native)
 		{
+			m_xf_reading_raw = true;
 			const auto [a, b, c] = get_vrs<f32[4]>(op.ra, op.rb, op.rc);
+			m_xf_reading_raw = false;
 			set_vr(op.rt4, value<f32[4]>(xf_native_arith(3, a.value, b.value, c.value)));
 			return;
 		}
@@ -9205,7 +9263,9 @@ public:
 	{
 		if (m_xf_native)
 		{
+			m_xf_reading_raw = true;
 			const auto [a, b, c] = get_vrs<f32[4]>(op.ra, op.rb, op.rc);
+			m_xf_reading_raw = false;
 			set_vr(op.rt4, value<f32[4]>(xf_native_arith(5, a.value, b.value, c.value)));
 			return;
 		}
