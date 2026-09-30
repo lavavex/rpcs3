@@ -875,10 +875,18 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 		{
 		case 0: r = m_ir->CreateFAdd(a, b); break;
 		case 1: r = m_ir->CreateFSub(a, b); break;
-		case 2: r = m_ir->CreateFMul(a, b); break;
+		// FM as a*b + +0: the same product, and a zero one is +0 as the SPU's
+		// (-0 + +0 is +0 rounding toward zero); FMS adds +0 after (a zero product
+		// less +0 is -0). With operands never -0, the others give -0 only by
+		// flushing a tiny negative result, which the check below sends to the
+		// double path with an operand read as -0 (loaded, or a denormal).
+		case 2: r = m_ir->CreateIntrinsic(llvm::Intrinsic::fma, {f32v}, {a, b, llvm::Constant::getNullValue(f32v)}); break;
 		case 3: r = m_ir->CreateIntrinsic(llvm::Intrinsic::fma, {f32v}, {a, b, c}); break;
 		case 4: r = m_ir->CreateIntrinsic(llvm::Intrinsic::fma, {f32v}, {m_ir->CreateFNeg(a), b, c}); break;
-		default: r = m_ir->CreateIntrinsic(llvm::Intrinsic::fma, {f32v}, {a, b, m_ir->CreateFNeg(c)}); break;
+		default:
+			r = m_ir->CreateIntrinsic(llvm::Intrinsic::fma, {f32v}, {a, b, m_ir->CreateFNeg(c)});
+			r = m_ir->CreateFAdd(r, llvm::Constant::getNullValue(f32v));
+			break;
 		}
 
 		if (xf_nocheck())
@@ -888,7 +896,8 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 
 		const auto s32v = get_type<s32[4]>();
 		const auto bits = m_ir->CreateAnd(m_ir->CreateBitCast(r, s32v), llvm::ConstantInt::get(s32v, 0x7fffffff));
-		const auto big = m_ir->CreateICmpSGT(bits, llvm::ConstantInt::get(s32v, 0x7f7ffffe));
+		const auto big = m_ir->CreateOr(m_ir->CreateICmpSGT(bits, llvm::ConstantInt::get(s32v, 0x7f7ffffe)),
+			m_ir->CreateICmpEQ(m_ir->CreateBitCast(r, s32v), llvm::ConstantInt::get(s32v, 0x80000000u)));
 
 		if (xf_nobranch())
 		{
@@ -901,12 +910,6 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 		{
 			// No branch: the region's end checks (xf_region_end)
 			m_xf_region.acc = m_xf_region.acc ? m_ir->CreateOr(m_xf_region.acc, big) : big;
-
-			if (const auto inst = llvm::dyn_cast<llvm::Instruction>(r))
-			{
-				inst->setMetadata(m_md_xf_raw_kind, llvm::MDNode::get(m_context, {}));
-			}
-
 			return r;
 		}
 
@@ -923,9 +926,6 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 		const auto phi = m_ir->CreatePHI(f32v, 2);
 		phi->addIncoming(r, here);
 		phi->addIncoming(doubled, slow_end);
-
-		// A zero may be -0 until the value leaves the float operations (xf_settle)
-		phi->setMetadata(m_md_xf_raw_kind, llvm::MDNode::get(m_context, {}));
 		return phi;
 	}
 
