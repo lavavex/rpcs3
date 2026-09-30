@@ -1797,7 +1797,7 @@ public:
 		{
 			m_spurt = &g_fxo->get<spu_runtime>();
 
-			m_md_xf_raw_kind = m_context.getMDKindID("spu.xf.raw");
+			m_md_xf_raw_kind = m_context.get().getMDKindID("spu.xf.raw");
 
 			if (static atomic_t<bool> s_logged{}; !s_logged.exchange(true))
 			{
