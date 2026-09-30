@@ -845,11 +845,21 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 		// -0 + +0 is +0 rounding toward zero
 		const auto fixed = m_ir->CreateFAdd(r, llvm::Constant::getNullValue(f32v));
 
+		// Testing: the thread's counts of both paths
+		const auto count = [&](u32 index)
+		{
+			const auto ptr = spu_ptr(&spu_thread::xf_counts, index);
+			m_ir->CreateStore(m_ir->CreateAdd(m_ir->CreateLoad(get_type<u64>(), ptr), m_ir->getInt64(1)), ptr);
+		};
+
+		count(0);
+
 		const auto here = m_ir->GetInsertBlock();
 		const auto slow = llvm::BasicBlock::Create(m_context, "__xf_double", m_function);
 		const auto done = llvm::BasicBlock::Create(m_context, "__xf_done", m_function);
 		m_ir->CreateCondBr(any, slow, done, m_md_unlikely);
 		m_ir->SetInsertPoint(slow);
+		count(1);
 		const auto doubled = by_double();
 		const auto slow_end = m_ir->GetInsertBlock();
 		m_ir->CreateBr(done);
@@ -1743,6 +1753,11 @@ public:
 		if (!m_spurt)
 		{
 			m_spurt = &g_fxo->get<spu_runtime>();
+
+			if (static atomic_t<bool> s_logged{}; !s_logged.exchange(true))
+			{
+				spu_log.notice("SPU LLVM: accurate xfloat on the host's single precision: %s (accuracy %s)", m_xf_native, g_cfg.core.spu_xfloat_accuracy.get());
+			}
 			cpu_translator::initialize(m_jit.get_context(), m_jit.get_engine());
 
 			const auto md_name = llvm::MDString::get(m_context, "branch_weights");
