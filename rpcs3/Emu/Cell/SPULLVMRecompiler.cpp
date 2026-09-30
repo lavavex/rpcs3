@@ -173,6 +173,26 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 	// Set while xf_native's operations read their operands: they take raw results
 	bool m_xf_reading_raw = false;
 
+	// Accurate xfloat's float results in the function being built (xf_native_arith):
+	// how each was made, and the lanes where it or anything it was made from
+	// reached FLT_MAX (the double path is needed there)
+	struct xf_node
+	{
+		u32 kind;
+		llvm::Value* a;
+		llvm::Value* b;
+		llvm::Value* c;
+		llvm::Value* acc;
+	};
+
+	std::unordered_map<llvm::Value*, xf_node> m_xf_nodes;
+
+	// Settled values in the SPU block being built, and the registers whose
+	// context copy is still raw (settled at the block's end or before anything
+	// that may read the context)
+	std::unordered_map<llvm::Value*, llvm::Value*> m_xf_settled;
+	std::bitset<s_reg_max> m_xf_pending;
+
 	// Accurate xfloat's registers as doubles (the path without xf_native)
 	const bool m_xf_double = g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::accurate && !m_xf_native;
 	llvm::MDNode* m_md_spu_context_domain{};
@@ -442,6 +462,9 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 		m_finfo = nullptr;
 		m_blocks.clear();
 		m_block_queue.clear();
+		m_xf_nodes.clear();
+		m_xf_settled.clear();
+		m_xf_pending.reset();
 		m_ir->SetInsertPoint(llvm::BasicBlock::Create(m_context, "", m_function));
 		m_memptr = m_ir->CreateLoad(get_type<u8*>(), spu_ptr(&spu_thread::memory_base_addr));
 	}
@@ -868,14 +891,40 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 		const auto s32v = get_type<s32[4]>();
 		const auto bits = m_ir->CreateAnd(m_ir->CreateBitCast(r, s32v), llvm::ConstantInt::get(s32v, 0x7fffffff));
 		const auto big = m_ir->CreateICmpSGT(bits, llvm::ConstantInt::get(s32v, 0x7f7ffffe));
-		const auto any = m_ir->CreateICmpNE(m_ir->CreateBitCast(big, m_ir->getIntNTy(4)), m_ir->getIntN(4, 0));
 
 		if (xf_nobranch())
 		{
+			const auto any = m_ir->CreateICmpNE(m_ir->CreateBitCast(big, m_ir->getIntNTy(4)), m_ir->getIntN(4, 0));
 			m_ir->CreateStore(m_ir->CreateZExt(any, get_type<u32>()), spu_ptr(&spu_thread::xf_sink))->setVolatile(true);
 			return r;
 		}
 
+		if (m_block && !m_block->block_wide_reg_store_elimination && !m_interp_magn)
+		{
+			// No branch here: the lanes that reached FLT_MAX gather along the value's
+			// operations, and where the value leaves them (xf_settle) one branch takes
+			// the double path for all of them. A branch for each operation split the
+			// code into a block for each (GTA IV: 34 fps against 45 without it).
+			llvm::Value* acc = big;
+
+			for (const auto input : {a, b, c})
+			{
+				if (const auto found = input ? m_xf_nodes.find(input) : m_xf_nodes.end(); found != m_xf_nodes.end())
+				{
+					acc = m_ir->CreateOr(acc, found->second.acc);
+				}
+			}
+
+			if (const auto inst = llvm::dyn_cast<llvm::Instruction>(r))
+			{
+				inst->setMetadata(m_md_xf_raw_kind, llvm::MDNode::get(m_context, {}));
+			}
+
+			m_xf_nodes[r] = xf_node{kind, a, b, c, acc};
+			return r;
+		}
+
+		const auto any = m_ir->CreateICmpNE(m_ir->CreateBitCast(big, m_ir->getIntNTy(4)), m_ir->getIntN(4, 0));
 		const auto here = m_ir->GetInsertBlock();
 		const auto slow = llvm::BasicBlock::Create(m_context, "__xf_double", m_function);
 		const auto done = llvm::BasicBlock::Create(m_context, "__xf_done", m_function);
@@ -894,6 +943,51 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 		return phi;
 	}
 
+	// A value accurate xfloat's double path makes for a value on floats: an
+	// operation of xf_native_arith is made again in double precision from its
+	// operands (memo: what this recomputation already made)
+	llvm::Value* xf_double_of(llvm::Value* value, std::unordered_map<llvm::Value*, llvm::Value*>& memo)
+	{
+		if (const auto found = memo.find(value); found != memo.end())
+		{
+			return found->second;
+		}
+
+		llvm::Value* result{};
+
+		if (const auto found = m_xf_nodes.find(value); found != m_xf_nodes.end())
+		{
+			const xf_node node = found->second;
+			const auto da = xf_double_of(node.a, memo);
+			const auto db = xf_double_of(node.b, memo);
+			const auto dc = node.c ? xf_double_of(node.c, memo) : nullptr;
+			const auto fmuladd = [&](llvm::Value* x, llvm::Value* y, llvm::Value* z)
+			{
+				return m_ir->CreateIntrinsic(llvm::Intrinsic::fmuladd, {get_type<f64[4]>()}, {x, y, z});
+			};
+
+			switch (node.kind)
+			{
+			case 0: result = m_ir->CreateFAdd(da, db); break;
+			case 1: result = m_ir->CreateFSub(da, db); break;
+			case 2: result = m_ir->CreateFMul(da, db); break;
+			case 3: result = fmuladd(da, db, dc); break;
+			case 4: result = fmuladd(m_ir->CreateFNeg(da), db, dc); break;
+			default: result = fmuladd(da, db, m_ir->CreateFNeg(dc)); break;
+			}
+
+			// Each instruction's result is clamped, as set_vr does on the double path
+			result = xfloat_in_double(result);
+		}
+		else
+		{
+			result = xfloat_to_double(m_ir->CreateBitCast(value, get_type<u32[4]>()));
+		}
+
+		memo.emplace(value, result);
+		return result;
+	}
+
 	// An accurate xfloat result on floats may hold -0, which the SPU makes +0: a
 	// float operation reads it the same (-0 and +0 differ only in a zero
 	// result, which is settled in turn), but anything else reads the bits, so
@@ -907,20 +1001,104 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 		return inst && m_md_xf_raw_kind && inst->getMetadata(m_md_xf_raw_kind);
 	}
 
-	llvm::Value* xf_settle(llvm::Value* value)
+	llvm::Value* xf_settle(llvm::Value* value, bool cache = true)
 	{
 		if (!xf_is_raw(value))
 		{
 			return value;
 		}
 
-		return m_ir->CreateFAdd(value, llvm::Constant::getNullValue(value->getType()));
+		const auto found = m_xf_nodes.find(value);
+
+		if (found == m_xf_nodes.end())
+		{
+			// Made with its own branch: only the zero
+			return m_ir->CreateFAdd(value, llvm::Constant::getNullValue(value->getType()));
+		}
+
+		if (cache)
+		{
+			if (const auto settled = m_xf_settled.find(value); settled != m_xf_settled.end())
+			{
+				return settled->second;
+			}
+		}
+
+		// Where any lane of it, or of what it was made from, reached FLT_MAX, the
+		// whole value on the double path
+		const auto f32v = value->getType();
+		const auto any = m_ir->CreateICmpNE(m_ir->CreateBitCast(found->second.acc, m_ir->getIntNTy(4)), m_ir->getIntN(4, 0));
+		const auto fast = m_ir->CreateFAdd(value, llvm::Constant::getNullValue(f32v));
+		const auto here = m_ir->GetInsertBlock();
+		const auto slow = llvm::BasicBlock::Create(m_context, "__xf_settle_double", m_function);
+		const auto done = llvm::BasicBlock::Create(m_context, "__xf_settled", m_function);
+		m_ir->CreateCondBr(any, slow, done, m_md_unlikely);
+		m_ir->SetInsertPoint(slow);
+		std::unordered_map<llvm::Value*, llvm::Value*> memo;
+		const auto doubled = m_ir->CreateBitCast(double_to_xfloat(xf_double_of(value, memo)), f32v);
+		const auto slow_end = m_ir->GetInsertBlock();
+		m_ir->CreateBr(done);
+		m_ir->SetInsertPoint(done);
+		const auto phi = m_ir->CreatePHI(f32v, 2);
+		phi->addIncoming(fast, here);
+		phi->addIncoming(doubled, slow_end);
+
+		if (cache)
+		{
+			m_xf_settled.emplace(value, phi);
+		}
+
+		return phi;
+	}
+
+	// The registers whose context copy is raw get their settled value there,
+	// and in the block: at the block's end, and before anything that may read the
+	// context (a call, a channel, a branch)
+	void xf_flush()
+	{
+		if (!m_block || m_xf_pending.none())
+		{
+			return;
+		}
+
+		for (u32 i = 0; i < s_reg_max; i++)
+		{
+			if (!m_xf_pending.test(i))
+			{
+				continue;
+			}
+
+			const auto value = ::at32(m_block->reg, i);
+			const auto settled = value ? xf_settle(value) : value;
+
+			if (settled && settled != value)
+			{
+				::at32(m_block->reg, i) = settled;
+
+				if (!(m_finfo && m_finfo->fn && (i <= 3 || (i >= s_reg_80 && i <= s_reg_127))))
+				{
+					auto& _store = m_block->store[i];
+
+					if (_store && m_block->store_context_last_id[i] == m_block->store_context_ctr[i])
+					{
+						_store->eraseFromParent();
+					}
+
+					_store = m_ir->CreateStore(bitcast(settled, get_reg_type(i)), init_reg_fixed(i));
+					spu_context_attr(_store);
+					m_block->store_context_last_id[i] = m_block->store_context_ctr[i];
+					m_block->store_context_first_id[i] = std::min<usz>(m_block->store_context_first_id[i], m_block->store_context_ctr[i]);
+				}
+			}
+		}
+
+		m_xf_pending.reset();
 	}
 
 	// The comparisons: natively unless a lane of either operand has exponent 255
-	// (an SPU value x86 reads as infinity or NaN), then as accurate xfloat's
-	// doubles. Denormals read as zero on either path. kind: 0 FCGT, 1 FCMGT,
-	// 2 FCEQ, 3 FCMEQ.
+	// (an SPU value x86 reads as infinity or NaN) or was made from a lane that
+	// reached FLT_MAX, then on accurate xfloat's doubles. Denormals read as zero
+	// on either path, and -0 as +0. kind: 0 FCGT, 1 FCMGT, 2 FCEQ, 3 FCMEQ.
 	llvm::Value* xf_native_cmp(u32 kind, llvm::Value* a, llvm::Value* b)
 	{
 		const auto s32v = get_type<s32[4]>();
@@ -938,7 +1116,8 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 
 		const auto by_double = [&]()
 		{
-			return compare(xfloat_to_double(m_ir->CreateBitCast(a, get_type<u32[4]>())), xfloat_to_double(m_ir->CreateBitCast(b, get_type<u32[4]>())));
+			std::unordered_map<llvm::Value*, llvm::Value*> memo;
+			return compare(xf_double_of(a, memo), xf_double_of(b, memo));
 		};
 
 		if (llvm::isa<llvm::Constant>(a) && llvm::isa<llvm::Constant>(b))
@@ -947,9 +1126,18 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 		}
 
 		const auto exp = llvm::ConstantInt::get(s32v, 0x7f800000);
-		const auto ea = m_ir->CreateICmpEQ(m_ir->CreateAnd(m_ir->CreateBitCast(a, s32v), exp), exp);
-		const auto eb = m_ir->CreateICmpEQ(m_ir->CreateAnd(m_ir->CreateBitCast(b, s32v), exp), exp);
-		const auto any = m_ir->CreateICmpNE(m_ir->CreateBitCast(m_ir->CreateOr(ea, eb), m_ir->getIntNTy(4)), m_ir->getIntN(4, 0));
+		llvm::Value* spec = m_ir->CreateOr(m_ir->CreateICmpEQ(m_ir->CreateAnd(m_ir->CreateBitCast(a, s32v), exp), exp),
+			m_ir->CreateICmpEQ(m_ir->CreateAnd(m_ir->CreateBitCast(b, s32v), exp), exp));
+
+		for (const auto input : {a, b})
+		{
+			if (const auto found = m_xf_nodes.find(input); found != m_xf_nodes.end())
+			{
+				spec = m_ir->CreateOr(spec, found->second.acc);
+			}
+		}
+
+		const auto any = m_ir->CreateICmpNE(m_ir->CreateBitCast(spec, m_ir->getIntNTy(4)), m_ir->getIntN(4, 0));
 		const auto fast = compare(a, b);
 
 		const auto here = m_ir->GetInsertBlock();
@@ -1202,6 +1390,9 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 #endif
 
 			::at32(m_block->reg, index) = saved_value;
+
+			// A raw xfloat result's context copy is settled later (xf_flush)
+			m_xf_pending.set(index, xf_is_raw(saved_value) && m_xf_nodes.contains(saved_value));
 		}
 
 		// Get register location
@@ -1244,7 +1435,7 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 		}
 
 		// Write register to the context
-		_store = m_ir->CreateStore(is_xfloat ? double_to_xfloat(saved_value) : bitcast(xf_settle(value), get_reg_type(index)), addr);
+		_store = m_ir->CreateStore(is_xfloat ? double_to_xfloat(saved_value) : bitcast(m_xf_pending.test(index) ? value : xf_settle(value), get_reg_type(index)), addr);
 
 		spu_context_attr(_store);
 	}
@@ -2787,6 +2978,8 @@ public:
 				const u32 baddr = m_block_queue[bi];
 				m_block = &m_blocks[baddr];
 				m_ir->SetInsertPoint(m_block->block);
+				m_xf_settled.clear();
+				m_xf_pending.reset();
 				auto& bb = ::at32(m_bbs, baddr);
 				bool need_check = false;
 				m_block->bb = &bb;
@@ -2857,7 +3050,7 @@ public:
 										// Settled where it leaves its block
 										const auto cblock = m_ir->GetInsertBlock();
 										m_ir->SetInsertPoint(bfound->second.block_end->getTerminator());
-										value = xf_settle(value);
+										value = xf_settle(value, false);
 										m_ir->SetInsertPoint(cblock);
 									}
 
@@ -3256,6 +3449,9 @@ public:
 
 				if (is_reduced_loop)
 				{
+					// The loop's code handles registers itself: raw xfloat results settled
+					xf_flush();
+
 					for (u32 i = 0; i < s_reg_max; i++)
 					{
 						llvm::Type* type = m_xf_double && bb.reg_maybe_xf.test_unsafe(i) ? get_type<f64[4]>() : get_reg_type(i);
@@ -3518,6 +3714,19 @@ public:
 					default: break;
 					}
 
+					// Raw xfloat results stay raw in the context across float, integer,
+					// shift, compare, constant and load or store instructions (they read
+					// their operands settled); anything else may read the context
+					if (m_xf_pending.any())
+					{
+						const auto itype = g_spu_itype.decode(op);
+
+						if (!(itype & spu_itype::floating) && !(itype & spu_itype::memory) && !(itype & spu_itype::pure))
+						{
+							xf_flush();
+						}
+					}
+
 					// Execute recompiler function (TODO)
 					(this->*decode(op))({op});
 				}
@@ -3525,6 +3734,8 @@ public:
 				// Finalize block with fallthrough if necessary
 				if (!llvm_has_terminator(m_ir->GetInsertBlock()))
 				{
+					xf_flush();
+
 					const u32 target = m_pos == baddr ? baddr : m_pos & 0x3fffc;
 
 					if (m_pos != baddr)
@@ -4832,6 +5043,9 @@ public:
 
 	void ensure_gpr_stores()
 	{
+		// Raw xfloat results settled in the context first
+		xf_flush();
+
 		if (m_block)
 		{
 			// Make previous stores not able to be reordered beyond this point or be deleted
