@@ -74,6 +74,10 @@ namespace utils
 #else
 		int m_file{};
 #endif
+#ifdef __PROSPERO__
+		// One direct-memory allocation, mapped at any number of addresses (ps5platform/shm.h)
+		s64 m_direct_start = -1;
+#endif
 		u32 m_flags{};
 		u64 m_size{};
 		atomic_t<void*> m_ptr{nullptr};
