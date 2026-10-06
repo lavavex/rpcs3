@@ -14,7 +14,8 @@
 
 using namespace std::literals::string_literals;
 
-#ifdef ANDROID
+// Set by the frontend before anything asks for a directory (Android, and the PS5 title)
+#if defined(ANDROID) || defined(__PROSPERO__)
 std::string g_android_executable_dir;
 std::string g_android_config_dir;
 std::string g_android_cache_dir;
@@ -2443,7 +2444,9 @@ bool fs::file::strict_read_check(u64 offset, u64 _size, u64 type_size) const
 
 std::string fs::get_executable_path()
 {
-#ifdef ANDROID
+#ifdef __PROSPERO__
+	return g_android_executable_dir + "/eboot.bin";
+#elif defined(ANDROID)
 	return g_android_executable_dir + "/dummy-rpcs3.apk";
 #else
 	// Use magic static
@@ -2496,7 +2499,7 @@ std::string fs::get_executable_path()
 
 std::string fs::get_executable_dir()
 {
-#ifdef ANDROID
+#if defined(ANDROID) || defined(__PROSPERO__)
 	return g_android_executable_dir;
 #else
 	// Use magic static
@@ -2517,7 +2520,7 @@ std::string fs::get_executable_dir()
 
 const std::string& fs::get_config_dir([[maybe_unused]] bool get_config_subdirectory)
 {
-#ifdef ANDROID
+#if defined(ANDROID) || defined(__PROSPERO__)
 	return g_android_config_dir;
 #else
 	// Use magic static
@@ -2615,7 +2618,7 @@ const std::string& fs::get_config_dir([[maybe_unused]] bool get_config_subdirect
 
 const std::string& fs::get_cache_dir()
 {
-#ifdef ANDROID
+#if defined(ANDROID) || defined(__PROSPERO__)
 	return g_android_cache_dir;
 #else
 	static const std::string s_dir = []
