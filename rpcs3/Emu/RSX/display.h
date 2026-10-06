@@ -15,6 +15,16 @@ using Window  = unsigned long;
 #include <wayland-client.h>
 #endif
 
+#ifdef __PROSPERO__
+// The PS5 has no windows: RADV presents to VideoOut through VK_KHR_display.
+// The handle carries the output size the title asks for.
+struct ps5_display_t
+{
+	unsigned width = 1920;
+	unsigned height = 1080;
+};
+#endif
+
 #ifdef _WIN32
 using display_handle_t = HWND;
 #elif defined(__APPLE__)
@@ -30,6 +40,8 @@ using display_handle_t = std::variant<
 	std::pair<wl_display*, wl_surface*>
 #elif defined(ANDROID)
 	struct ANativeWindow*
+#elif defined(__PROSPERO__)
+	struct ps5_display_t
 #endif
 >;
 #endif

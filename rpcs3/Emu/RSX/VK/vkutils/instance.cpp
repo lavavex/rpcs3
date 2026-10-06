@@ -174,6 +174,13 @@ namespace vk
 				found_surface_ext = true;
 			}
 #endif //(WAYLAND)
+#ifdef __PROSPERO__
+			if (support.is_supported(VK_KHR_DISPLAY_EXTENSION_NAME))
+			{
+				extensions.push_back(VK_KHR_DISPLAY_EXTENSION_NAME);
+				found_surface_ext = true;
+			}
+#endif
 #ifdef ANDROID
 			if (support.is_supported(VK_KHR_ANDROID_SURFACE_EXTENSION_NAME))
 			{
@@ -290,7 +297,11 @@ namespace vk
 		{
 			.supports_automatic_wm_reports = true
 		};
+#ifdef __PROSPERO__
+		m_surface = make_WSI_surface(m_instance, dev, window_handle, &surface_config);
+#else
 		m_surface = make_WSI_surface(m_instance, window_handle, &surface_config);
+#endif
 
 		u32 device_queues = dev.get_queue_count();
 		std::vector<VkBool32> supports_present(device_queues, VK_FALSE);

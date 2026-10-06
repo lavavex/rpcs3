@@ -587,7 +587,7 @@ target_sources(rpcs3_emu PRIVATE
     RSX/Utils/rsx_utils.cpp
 )
 
-if(NOT ANDROID AND NOT APPLE)
+if(NOT ANDROID AND NOT APPLE AND NOT PS5)
     target_sources(rpcs3_emu PRIVATE
         RSX/GL/GLCommonDecompiler.cpp
         RSX/GL/GLCompute.cpp
@@ -730,4 +730,10 @@ endif()
 
 if(WAYLAND_FOUND)
     target_link_libraries(rpcs3_emu PRIVATE OpenGL::EGL)
+endif()
+
+if(PS5)
+    # cellL10n converts the PS3's character sets with iconv; the PS5 libc has none.
+    target_include_directories(rpcs3_emu PRIVATE ${Iconv_INCLUDE_DIR})
+    target_link_libraries(rpcs3_emu PRIVATE ${Iconv_LIBRARY})
 endif()
