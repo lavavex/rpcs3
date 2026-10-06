@@ -19,6 +19,10 @@ target_link_libraries(rpcs3_ps5 PRIVATE rpcs3_emu 3rdparty::stblib 3rdparty::zli
 
 set_target_properties(rpcs3_ps5 PROPERTIES OUTPUT_NAME rpcs3_ps5.elf)
 
+# The link is the title's (rpcs3-PS5 tools/link-title.sh): RADV, the platform layer's bindings,
+# the title CRT, then ps5-native-tool signs dist/<TITLE_ID>/eboot.bin
+set(CMAKE_CXX_LINK_EXECUTABLE "bash ${RPCS3_PS5_ROOT}/tools/link-title.sh <TARGET> <OBJECTS> <LINK_LIBRARIES> <LINK_FLAGS>")
+
 # libc gaps in a title, answered by the platform layer (ps5platform/libc.h):
 # accept4 and getpagesizes are not exported at all; realpath is refused (EPERM)
 # and getcwd resolves to nothing, so both go to the platform's versions.
