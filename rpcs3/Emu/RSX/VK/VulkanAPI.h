@@ -21,7 +21,12 @@
 #pragma warning( disable : 4005 )
 #endif
 
+#ifdef __PROSPERO__
+// No loader on the PS5: volk holds the entry points of the RADV linked into the title
+#include <volk.h>
+#else
 #include <vulkan/vulkan.h>
+#endif
 
 #ifdef _MSC_VER
 #pragma warning(pop)

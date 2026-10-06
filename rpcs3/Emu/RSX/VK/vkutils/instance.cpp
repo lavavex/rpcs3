@@ -234,6 +234,11 @@ namespace vk
 			return false;
 		}
 
+#ifdef __PROSPERO__
+		// Instance (and device) commands for this instance
+		volkLoadInstance(m_instance);
+#endif
+
 		return true;
 	}
 #ifdef __clang__

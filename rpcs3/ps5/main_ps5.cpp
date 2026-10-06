@@ -43,6 +43,7 @@
 #include "util/video_source.h"
 
 #include <ps5platform/klog.h>
+#include <volk.h>
 
 #include <condition_variable>
 #include <ctime>
@@ -56,6 +57,9 @@ cfg_input_configurations g_cfg_input_configs;
 
 // A per-boot input configuration name (the Qt frontend's --input-config); unused here
 std::string g_input_config_override;
+
+// RADV, linked into the title, answers what a loader would
+extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char* name);
 
 extern std::string g_android_executable_dir;
 extern std::string g_android_config_dir;
@@ -457,6 +461,9 @@ int main(int /*argc*/, char** /*argv*/)
 	sys_log.always()("%s", rpcs3::get_verbose_version());
 	sys_log.notice("Running as a native PS5 title; data in %s", data_dir);
 	sys_log.notice("%s", utils::get_system_info());
+
+	// Vulkan's global commands from RADV, before anything creates an instance
+	volkInitializeCustom(vk_icdGetInstanceProcAddr);
 
 	create_callbacks();
 
