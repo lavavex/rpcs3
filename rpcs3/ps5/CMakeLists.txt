@@ -3,6 +3,7 @@ add_executable(rpcs3_ps5
     main_ps5.cpp
     ps5_audio_backend.cpp
     ps5_firmware.cpp
+    ps5_libc_compat.c
     ps5_pad_handler.cpp
     ../Input/mouse_gyro_handler.cpp
     ../Input/pad_thread.cpp
@@ -29,6 +30,23 @@ set(CMAKE_CXX_LINK_EXECUTABLE "bash ${RPCS3_PS5_ROOT}/tools/link-title.sh <TARGE
 target_link_options(rpcs3_ps5 PRIVATE
     -Wl,--defsym=accept4=ps5_accept4
     -Wl,--defsym=getpagesizes=ps5_getpagesizes
+    -Wl,--defsym=getpwnam_r=ps5_getpwnam_r
+    -Wl,--defsym=if_indextoname=ps5_if_indextoname
+    -Wl,--defsym=if_nametoindex=ps5_if_nametoindex
+    -Wl,--defsym=posix_madvise=ps5_posix_madvise
+    -Wl,--defsym=strsignal=ps5_strsignal
+    -Wl,--defsym=syscall=ps5_syscall
+    -Wl,--defsym=times=ps5_times
+    -Wl,--defsym=fchown=ps5_fchown
+    -Wl,--defsym=fork=ps5_fork
+    -Wl,--defsym=fstatfs=ps5_fstatfs
+    -Wl,--defsym=gai_strerror=ps5_gai_strerror
+    -Wl,--defsym=getnameinfo=ps5_getnameinfo
+    -Wl,--defsym=isatty=ps5_isatty
+    -Wl,--defsym=setsid=ps5_setsid
+    -Wl,--defsym=statfs=ps5_statfs
+    -Wl,--defsym=umask=ps5_umask
+    -Wl,--defsym=wait4=ps5_wait4
     -Wl,--wrap=realpath -Wl,--defsym=__wrap_realpath=ps5_realpath
     -Wl,--wrap=getcwd -Wl,--defsym=__wrap_getcwd=ps5_getcwd
 )
