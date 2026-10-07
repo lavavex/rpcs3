@@ -65,6 +65,9 @@ std::string g_input_config_override;
 // RADV, linked into the title, answers what a loader would
 extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char* name);
 
+// Set while a game runs that should return to Big Picture Mode when it stops (System.cpp)
+extern atomic_t<bool> g_big_picture_mode_active;
+
 extern std::string g_android_executable_dir;
 extern std::string g_android_config_dir;
 extern std::string g_android_cache_dir;
@@ -211,6 +214,8 @@ namespace
 
 		g_emu_callbacks.try_to_quit = [](bool force_quit, std::function<void()> on_exit) -> bool
 		{
+			// Only an explicit quit (Big Picture Mode's Exit, with auto-exit on) closes the title;
+			// otherwise there is no window to stay on and Big Picture Mode comes back by itself
 			if (force_quit)
 			{
 				if (on_exit)
@@ -319,7 +324,7 @@ namespace
 		g_emu_callbacks.on_run    = [](bool) {};
 		g_emu_callbacks.on_pause  = []() {};
 		g_emu_callbacks.on_resume = []() {};
-		g_emu_callbacks.on_stop   = []() { sys_log.notice("Emulation stopped"); request_quit(); };
+		g_emu_callbacks.on_stop   = []() { sys_log.notice("Emulation stopped"); };
 		g_emu_callbacks.on_ready  = []() {};
 		g_emu_callbacks.on_emulation_stop_no_response = [](std::shared_ptr<atomic_t<bool>> closed_successfully, int)
 		{
@@ -536,12 +541,18 @@ int main(int /*argc*/, char** /*argv*/)
 	apply_ps5_defaults();
 
 	// Vulkan is the only real renderer on the PS5: a config that says Null (an early build wrote
-	// that default) is moved to Vulkan once
-	if (g_cfg.video.renderer == video_renderer::null)
+	// that default) is moved to Vulkan once. Auto-exit stays on: Big Picture Mode's Exit closes
+	// the title through it.
+	if (g_cfg.video.renderer == video_renderer::null || !g_cfg.misc.autoexit)
 	{
-		g_cfg.video.renderer.set(video_renderer::vulkan);
+		if (g_cfg.video.renderer == video_renderer::null)
+		{
+			g_cfg.video.renderer.set(video_renderer::vulkan);
+			sys_log.warning("Renderer was Null: set to Vulkan");
+		}
+
+		g_cfg.misc.autoexit.set(true);
 		Emulator::SaveSettings(g_cfg.to_string(), "");
-		sys_log.warning("Renderer was Null: set to Vulkan");
 	}
 
 	// Firmware: install it once from /data/rpcs3/PS3UPDAT.PUP
@@ -561,36 +572,46 @@ int main(int /*argc*/, char** /*argv*/)
 		sys_log.always()("Firmware version: %s", fw);
 	}
 
+	// What to start: Big Picture Mode (RPCS3's controller game shelf), unless /data/rpcs3/boot.txt
+	// names a game, an ISO, a folder or a .pkg to install
 	const std::string target = read_boot_target();
 
-	if (target.empty())
-	{
-		sys_log.error("Nothing to boot: write a path into %sboot.txt", data_dir);
-		logs::listener::sync_all();
-		close_title(0);
-	}
-
-	if (target.ends_with(".pkg") || target.ends_with(".PKG"))
+	if (!target.empty() && (target.ends_with(".pkg") || target.ends_with(".PKG")))
 	{
 		sys_log.notice("Installing %s", target);
 		const bool ok = rpcs3::utils::install_pkg(target, false);
 		sys_log.always()("Package install %s: %s", ok ? "succeeded" : "failed", target);
-		logs::listener::sync_all();
-		close_title(ok ? 0 : 1);
 	}
 
-	sys_log.notice("Booting %s", target);
-
-	Emu.CallFromMainThread([target]()
+	if (!target.empty() && !target.ends_with(".pkg") && !target.ends_with(".PKG"))
 	{
-		Emu.SetForceBoot(true);
+		sys_log.notice("Booting %s (boot.txt)", target);
 
-		if (const game_boot_result error = Emu.BootGame(target); error != game_boot_result::no_errors)
+		Emu.CallFromMainThread([target]()
 		{
-			sys_log.error("Booting '%s' failed: reason: %s", target, error);
-			request_quit();
-		}
-	});
+			// When the game stops, Big Picture Mode comes back
+			g_big_picture_mode_active = true;
+			Emu.SetForceBoot(true);
+
+			if (const game_boot_result error = Emu.BootGame(target); error != game_boot_result::no_errors)
+			{
+				sys_log.error("Booting '%s' failed: reason: %s", target, error);
+				g_big_picture_mode_active = false;
+				Emu.BootBigPictureMode();
+			}
+		});
+	}
+	else
+	{
+		Emu.CallFromMainThread([]()
+		{
+			if (!Emu.BootBigPictureMode())
+			{
+				sys_log.fatal("Big Picture Mode did not start");
+				request_quit();
+			}
+		});
+	}
 
 	// The main thread: run what RPCS3 posts until emulation ends
 	while (true)
