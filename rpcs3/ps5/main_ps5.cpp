@@ -10,6 +10,7 @@
 #include "ps5_audio_backend.h"
 #include "ps5_firmware.h"
 #include "ps5_frame.h"
+#include "ps5_msg_dialog.h"
 #include "ps5_pad_handler.h"
 #include "ps5_sce.h"
 
@@ -282,7 +283,8 @@ namespace
 		g_emu_callbacks.get_music_handler  = []() -> std::shared_ptr<music_handler_base> { return std::make_shared<null_music_handler>(); };
 
 		// Dialogs: RPCS3's native overlays draw them; nothing comes from the frontend
-		g_emu_callbacks.get_msg_dialog                 = []() -> std::shared_ptr<MsgDialogBase> { return {}; };
+		// Before the renderer exists (boot compilation) progress goes to system notifications
+		g_emu_callbacks.get_msg_dialog                 = []() -> std::shared_ptr<MsgDialogBase> { return std::make_shared<ps5_msg_dialog>(); };
 		g_emu_callbacks.get_osk_dialog                 = []() -> std::shared_ptr<OskDialogBase> { return {}; };
 		g_emu_callbacks.get_save_dialog                = []() -> std::unique_ptr<SaveDialogBase> { return {}; };
 		g_emu_callbacks.get_trophy_notification_dialog = []() -> std::unique_ptr<TrophyNotificationBase> { return {}; };
