@@ -261,8 +261,36 @@ namespace utils
 			return ps5_vrange_reserve_at(use_addr, size) == 0 ? use_addr : nullptr;
 		}
 
+		// No address asked for: the low ranges are small (first fit there runs out after a few
+		// JIT memory managers, which RPCS3 never releases), so place it in the large range above
+		// guest memory (0x10'0000'0000+), bumping a hint. 16 GiB fit at a hint up to 512 GiB.
+		static atomic_t<u64> s_next_hint = 0x40'0000'0000;
+
+		for (u32 attempt = 0; attempt < 64; attempt++)
+		{
+			const u64 step = utils::align<u64>(size, 0x1000'0000);
+			const u64 hint = s_next_hint.fetch_add(step);
+
+			if (hint + size > 0xFF'0000'0000)
+			{
+				s_next_hint.compare_and_swap(hint + step, 0x40'0000'0000);
+				continue;
+			}
+
+			void* base = nullptr;
+			if (ps5_vrange_reserve(size, reinterpret_cast<void*>(hint), 0x10000, &base) == 0)
+			{
+				return base;
+			}
+		}
+
 		void* base = nullptr;
-		return ps5_vrange_reserve(size, nullptr, 0x10000, &base) == 0 ? base : nullptr;
+		if (const int rc = ps5_vrange_reserve(size, nullptr, 0x10000, &base); rc != 0)
+		{
+			std::fprintf(stderr, "memory_reserve(0x%zx) failed: 0x%x\n", size, static_cast<u32>(rc));
+			return nullptr;
+		}
+		return base;
 #else
 		if (use_addr && reinterpret_cast<uptr>(use_addr) % 0x10000)
 		{
@@ -347,7 +375,10 @@ namespace utils
 #ifdef _WIN32
 		ensure(::VirtualAlloc(pointer, size, MEM_COMMIT, +prot));
 #elif defined(__PROSPERO__)
-		ensure(ps5_vrange_commit(pointer, size, +prot) == 0, "ps5_vrange_commit failed");
+		if (const int rc = ps5_vrange_commit(pointer, size, +prot); rc != 0)
+		{
+			fmt::throw_exception("ps5_vrange_commit(%p, 0x%x, %d) failed: 0x%x", pointer, size, +prot, static_cast<u32>(rc));
+		}
 #else
 		const u64 ptr64 = reinterpret_cast<u64>(pointer);
 		ensure(::mprotect(reinterpret_cast<void*>(ptr64 & -get_page_size()), size + (ptr64 & (get_page_size() - 1)), +prot) != -1);
@@ -410,7 +441,10 @@ namespace utils
 		memory_commit(pointer, size, prot);
 #elif defined(__PROSPERO__)
 		ensure(ps5_vrange_decommit(pointer, size) == 0, "ps5_vrange_decommit failed");
-		ensure(ps5_vrange_commit(pointer, size, +prot) == 0, "ps5_vrange_commit failed");
+		if (const int rc = ps5_vrange_commit(pointer, size, +prot); rc != 0)
+		{
+			fmt::throw_exception("ps5_vrange_commit(%p, 0x%x, %d) failed: 0x%x", pointer, size, +prot, static_cast<u32>(rc));
+		}
 #else
 		const u64 ptr64 = reinterpret_cast<u64>(pointer);
 #if defined(__APPLE__) && defined(ARCH_ARM64)
