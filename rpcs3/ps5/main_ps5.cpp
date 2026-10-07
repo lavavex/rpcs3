@@ -477,6 +477,8 @@ int main(int /*argc*/, char** /*argv*/)
 	// Vulkan (RADV) is the PS5's renderer: the default RPCS3 writes into a new config.yml
 	Emu.SetDefaultRenderer(video_renderer::vulkan);
 	Emu.SetSupportedRenderers({video_renderer::null, video_renderer::vulkan});
+	// Init requires a default adapter name with Vulkan; an unknown name selects the first GPU, the only one
+	Emu.SetDefaultGraphicsAdapter("PS5 GPU (RADV)");
 
 	Emu.SetHasGui(false);
 	Emu.SetHeadless(false);
