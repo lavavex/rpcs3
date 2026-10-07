@@ -390,7 +390,27 @@ namespace
 				t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, vfs::escape(title, true), t.tm_hour, t.tm_min, t.tm_sec));
 		};
 
-		g_emu_callbacks.get_database_config = [](const std::string&) { return std::string(); };
+		// RPCS3's per-game recommended settings (the database the Qt frontend downloads), packaged
+		// one file per title: game_configs/<TITLE_ID>.yml, in /data/rpcs3 (to update over FTP) or /app0
+		g_emu_callbacks.get_database_config = [](const std::string& title_id) -> std::string
+		{
+			if (title_id.empty())
+			{
+				return {};
+			}
+
+			for (const std::string& dir : { std::string(data_dir) + "game_configs/", std::string("/app0/game_configs/") })
+			{
+				if (fs::file f{dir + title_id + ".yml"})
+				{
+					sys_log.notice("Database config for %s: %s", title_id, dir);
+					return f.to_string();
+				}
+			}
+
+			sys_log.notice("No database config for %s", title_id);
+			return {};
+		};
 	}
 
 	// The first line of /data/rpcs3/boot.txt: an EBOOT.BIN, a game folder, an ISO, or a .pkg to install
