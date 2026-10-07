@@ -533,24 +533,44 @@ namespace rsx
 					}
 					case detail_level::medium:
 					{
-						m_ppus = idm::select<named_thread<ppu_thread>>([this](u32, named_thread<ppu_thread>& ppu)
+						u64 ppu_cycles = 0;
+						u64 spu_cycles = 0;
+
+						m_ppus = idm::select<named_thread<ppu_thread>>([&](u32, named_thread<ppu_thread>& ppu)
 						{
-							m_ppu_cycles += thread_ctrl::get_cycles(ppu);
+							ppu_cycles += thread_ctrl::get_cycles(ppu);
 						});
 
-						m_spus = idm::select<named_thread<spu_thread>>([this](u32, named_thread<spu_thread>& spu)
+						m_spus = idm::select<named_thread<spu_thread>>([&](u32, named_thread<spu_thread>& spu)
 						{
-							m_spu_cycles += thread_ctrl::get_cycles(spu);
+							spu_cycles += thread_ctrl::get_cycles(spu);
 						});
 
-						m_rsx_cycles += rsx_thread.get_cycles();
+						const u64 rsx_cycles = rsx_thread.get_cycles();
 
+						m_ppu_cycles += ppu_cycles;
+						m_spu_cycles += spu_cycles;
+						m_rsx_cycles += rsx_cycles;
+
+#ifdef __PROSPERO__
+						// The PS5 has no usable process CPU time (cpu_stats::get_usage reads a constant
+						// 1/thread count): the thread CPU times (ns) of this interval, as a share of
+						// all hardware threads, give each part and the total
+						{
+							const f64 budget = std::max(1.0, elapsed_update * 1'000'000.0 * utils::get_thread_count());
+							m_ppu_usage = std::clamp(static_cast<f32>(ppu_cycles * 100.0 / budget), 0.f, 100.f);
+							m_spu_usage = std::clamp(static_cast<f32>(spu_cycles * 100.0 / budget), 0.f, 100.f);
+							m_rsx_usage = std::clamp(static_cast<f32>(rsx_cycles * 100.0 / budget), 0.f, 100.f);
+							m_cpu_usage = std::min(100.f, m_ppu_usage + m_spu_usage + m_rsx_usage);
+						}
+#else
 						m_total_cycles = std::max<u64>(1, m_ppu_cycles + m_spu_cycles + m_rsx_cycles);
 						m_cpu_usage    = static_cast<f32>(m_cpu_stats.get_usage());
 
 						m_ppu_usage = std::clamp(m_cpu_usage * m_ppu_cycles / m_total_cycles, 0.f, 100.f);
 						m_spu_usage = std::clamp(m_cpu_usage * m_spu_cycles / m_total_cycles, 0.f, 100.f);
 						m_rsx_usage = std::clamp(m_cpu_usage * m_rsx_cycles / m_total_cycles, 0.f, 100.f);
+#endif
 
 						[[fallthrough]];
 					}
