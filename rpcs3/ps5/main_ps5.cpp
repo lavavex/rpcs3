@@ -486,6 +486,47 @@ namespace
 		}
 	}
 
+	// Games on USB drives (and M.2/extended storage): <drive>/games/<game> or <drive>/RPCS3/games/<game>,
+	// each a disc folder (PS3_GAME), an installed game or an ISO, as in /data/rpcs3/games
+	void scan_external_games()
+	{
+		static const char* const roots[] = {
+			"/mnt/usb0", "/mnt/usb1", "/mnt/usb2", "/mnt/usb3", "/mnt/usb4", "/mnt/usb5", "/mnt/usb6", "/mnt/usb7",
+			"/mnt/ext0", "/mnt/ext1",
+		};
+
+		// What the title's sandbox shows of the console's mounts
+		std::string visible;
+		for (const auto& entry : fs::dir("/mnt"))
+		{
+			if (entry.name != "." && entry.name != "..")
+			{
+				visible += " " + entry.name;
+			}
+		}
+		sys_log.notice("/mnt:%s", visible.empty() ? " (nothing visible)" : visible);
+
+		for (const char* root : roots)
+		{
+			if (!fs::is_dir(root))
+			{
+				continue;
+			}
+
+			sys_log.notice("Drive: %s", root);
+
+			for (const char* sub : { "/games", "/RPCS3/games" })
+			{
+				const std::string dir = std::string(root) + sub;
+				if (fs::is_dir(dir))
+				{
+					const u32 added = Emu.AddGamesFromDir(dir);
+					sys_log.notice("Games on %s: %u new", dir, added);
+				}
+			}
+		}
+	}
+
 	// Defaults for the PS5 the first time (a user's config.yml keeps its own choices)
 	void apply_ps5_defaults()
 	{
@@ -662,6 +703,8 @@ int main(int /*argc*/, char** /*argv*/)
 	{
 		Emu.CallFromMainThread([]()
 		{
+			scan_external_games();
+
 			if (!Emu.BootBigPictureMode())
 			{
 				sys_log.fatal("Big Picture Mode did not start");
