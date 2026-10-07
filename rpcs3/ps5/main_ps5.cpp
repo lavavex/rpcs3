@@ -343,7 +343,18 @@ namespace
 
 		g_emu_callbacks.get_localized_string    = [](localized_string_id id, const char* args) -> std::string { return localized(id, args); };
 		g_emu_callbacks.get_localized_u32string = [](localized_string_id id, const char* args) -> std::u32string { return utf8_to_u32string(localized(id, args)); };
-		g_emu_callbacks.get_localized_setting   = [](const cfg::_base*, u32) -> std::string { return {}; };
+		// A setting's choices by name ("Vulkan", "1280x720"): the Qt frontend's translated labels
+		// are Qt-only; the config's own value names read well enough
+		g_emu_callbacks.get_localized_setting   = [](const cfg::_base* node, u32 index) -> std::string
+		{
+			if (!node)
+			{
+				return {};
+			}
+
+			const std::vector<std::string> names = node->to_list();
+			return index < names.size() ? names[index] : std::string();
+		};
 
 		g_emu_callbacks.play_sound = [](const std::string&, std::optional<f32>) {};
 		g_emu_callbacks.add_breakpoint = [](u32) {};
