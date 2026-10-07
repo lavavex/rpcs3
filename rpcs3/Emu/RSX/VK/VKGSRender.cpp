@@ -1246,8 +1246,16 @@ void VKGSRender::on_init_thread()
 	GSRender::on_init_thread();
 	zcull_ctrl.reset(static_cast<::rsx::reports::ZCULL_control*>(this));
 
-	if (g_cfg.video.shadermode == shader_mode::async_with_interpreter ||
-		g_cfg.video.shadermode == shader_mode::interpreter_only)
+	// The PS5 runs Big Picture Mode on this renderer too, with no game: its menus never use the
+	// shader interpreter, so do not build its pipeline variants there
+#ifdef __PROSPERO__
+	const bool hosting_game = !Emu.GetTitleID().empty();
+#else
+	constexpr bool hosting_game = true;
+#endif
+
+	if (hosting_game && (g_cfg.video.shadermode == shader_mode::async_with_interpreter ||
+		g_cfg.video.shadermode == shader_mode::interpreter_only))
 	{
 		std::unique_ptr<rsx::shader_loading_dialog> dlg = m_overlay_manager
 			? std::make_unique<rsx::shader_loading_dialog_native>(this)

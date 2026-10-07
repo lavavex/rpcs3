@@ -214,8 +214,9 @@ namespace
 
 		g_emu_callbacks.try_to_quit = [](bool force_quit, std::function<void()> on_exit) -> bool
 		{
-			// Only an explicit quit (Big Picture Mode's Exit, with auto-exit on) closes the title;
-			// otherwise there is no window to stay on and Big Picture Mode comes back by itself
+			// RPCS3 asks this after every stop, before it starts Big Picture Mode again for a game that
+			// ends (auto-exit stays off, so force_quit is false then). Quit only if nothing came back:
+			// that was Big Picture Mode's own Exit
 			if (force_quit)
 			{
 				if (on_exit)
@@ -226,6 +227,20 @@ namespace
 				request_quit();
 				return true;
 			}
+
+			std::thread([]()
+			{
+				std::this_thread::sleep_for(2s);
+
+				Emu.CallFromMainThread([]()
+				{
+					if (Emu.IsStopped())
+					{
+						sys_log.notice("Nothing is running after the stop: closing the title");
+						request_quit();
+					}
+				});
+			}).detach();
 
 			return false;
 		};
@@ -483,7 +498,7 @@ namespace
 		g_cfg.video.renderer.set(video_renderer::vulkan);
 		g_cfg.audio.renderer.set(audio_renderer::cubeb); // any non-null renderer selects SceAudioOut
 		g_cfg.misc.use_native_interface.set(true);
-		g_cfg.misc.autoexit.set(true);
+		g_cfg.misc.autoexit.set(false);
 		Emulator::SaveSettings(g_cfg.to_string(), "");
 		sys_log.notice("Wrote PS5 defaults to %s", config_path);
 	}
@@ -583,9 +598,9 @@ int main(int /*argc*/, char** /*argv*/)
 	}
 
 	// Vulkan is the only real renderer on the PS5: a config that says Null (an early build wrote
-	// that default) is moved to Vulkan once. Auto-exit stays on: Big Picture Mode's Exit closes
-	// the title through it.
-	if (g_cfg.video.renderer == video_renderer::null || !g_cfg.misc.autoexit)
+	// that default) is moved to Vulkan once. Auto-exit stays off: with it, a game's exit would close
+	// the title before Big Picture Mode comes back (try_to_quit decides instead)
+	if (g_cfg.video.renderer == video_renderer::null || g_cfg.misc.autoexit)
 	{
 		if (g_cfg.video.renderer == video_renderer::null)
 		{
@@ -593,7 +608,7 @@ int main(int /*argc*/, char** /*argv*/)
 			sys_log.warning("Renderer was Null: set to Vulkan");
 		}
 
-		g_cfg.misc.autoexit.set(true);
+		g_cfg.misc.autoexit.set(false);
 		Emulator::SaveSettings(g_cfg.to_string(), "");
 	}
 
