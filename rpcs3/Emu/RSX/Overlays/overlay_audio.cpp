@@ -15,7 +15,9 @@ namespace rsx
 		{
 			if (audio_path.empty()) return;
 
-			m_video_source = ensure(g_emu_callbacks.make_video_source());
+			// Frontends without a video player (headless, PS5) stay silent
+			if (!g_emu_callbacks.make_video_source || !(m_video_source = g_emu_callbacks.make_video_source())) return;
+
 			m_video_source->set_audio_path(audio_path, audio_in_archive);
 
 			if (audio_in_archive)
