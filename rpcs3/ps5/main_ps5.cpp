@@ -10,7 +10,6 @@
 #include "ps5_audio_backend.h"
 #include "ps5_firmware.h"
 #include "ps5_frame.h"
-#include "ps5_msg_dialog.h"
 #include "ps5_pad_handler.h"
 #include "ps5_sce.h"
 
@@ -19,7 +18,6 @@
 #include "Emu/System.h"
 #include "Emu/system_config.h"
 #include "Emu/system_utils.hpp"
-#include "Emu/system_progress.hpp"
 #include "Emu/localized_string_id.h"
 #include "Emu/RSX/Overlays/overlay_utils.h"
 #include "Emu/IdManager.h"
@@ -313,8 +311,7 @@ namespace
 		g_emu_callbacks.get_music_handler  = []() -> std::shared_ptr<music_handler_base> { return std::make_shared<null_music_handler>(); };
 
 		// Dialogs: RPCS3's native overlays draw them; nothing comes from the frontend
-		// Before the renderer exists (boot compilation) progress goes to system notifications
-		g_emu_callbacks.get_msg_dialog                 = []() -> std::shared_ptr<MsgDialogBase> { return std::make_shared<ps5_msg_dialog>(); };
+		g_emu_callbacks.get_msg_dialog                 = []() -> std::shared_ptr<MsgDialogBase> { return {}; };
 		g_emu_callbacks.get_osk_dialog                 = []() -> std::shared_ptr<OskDialogBase> { return {}; };
 		g_emu_callbacks.get_save_dialog                = []() -> std::unique_ptr<SaveDialogBase> { return {}; };
 		g_emu_callbacks.get_trophy_notification_dialog = []() -> std::unique_ptr<TrophyNotificationBase> { return {}; };
@@ -575,43 +572,6 @@ int main(int /*argc*/, char** /*argv*/)
 		}
 	});
 
-	// Boot progress (PPU/SPU compilation): RPCS3's own dialog needs a renderer that draws,
-	// which there is not yet; report its progress counters as system notifications instead
-	ps5_msg_dialog progress;
-	bool progress_open = false;
-	u32 progress_limit = 0;
-
-	const auto report_progress = [&]()
-	{
-		const std::string text = g_progr_text;
-		const u32 total = g_progr_ptotal + g_progr_ftotal;
-		const u32 done = g_progr_pdone + g_progr_fdone;
-
-		if (text.empty() && !total)
-		{
-			progress_open = false;
-			return;
-		}
-
-		if (!progress_open)
-		{
-			progress_open = true;
-			progress.Create(text.empty() ? "Compiling" : text);
-		}
-		else if (!text.empty())
-		{
-			progress.SetMsg(text);
-		}
-
-		if (total != progress_limit)
-		{
-			progress_limit = total;
-			progress.ProgressBarSetLimit(0, total);
-		}
-
-		progress.ProgressBarSetValue(0, done);
-	};
-
 	// The main thread: run what RPCS3 posts until emulation ends
 	while (true)
 	{
@@ -619,15 +579,7 @@ int main(int /*argc*/, char** /*argv*/)
 		{
 			std::unique_lock lock(s_main_queue.mutex);
 
-			while (!s_main_queue.quit && s_main_queue.items.empty())
-			{
-				if (s_main_queue.cv.wait_for(lock, 1s) == std::cv_status::timeout)
-				{
-					lock.unlock();
-					report_progress();
-					lock.lock();
-				}
-			}
+			s_main_queue.cv.wait(lock, [] { return s_main_queue.quit || !s_main_queue.items.empty(); });
 
 			if (s_main_queue.items.empty())
 			{
