@@ -2522,6 +2522,15 @@ const bool s_exception_handler_set = []() -> bool
 
 #else
 
+// Ends the calling thread. On the PS5 the platform layer created it (radv-link.sh wraps
+// pthread_create) and must end it: its pthread_exit runs the thread_local destructors first.
+#ifdef __PROSPERO__
+extern "C" [[noreturn]] void ps5_pthread_exit(void* value);
+[[noreturn]] static void thread_exit_native() { ps5_pthread_exit(nullptr); }
+#elif !defined(_WIN32)
+[[noreturn]] static void thread_exit_native() { pthread_exit(nullptr); }
+#endif
+
 static void signal_handler(int /*sig*/, siginfo_t* info, void* uct) noexcept
 {
 	ucontext_t* context = static_cast<ucontext_t*>(uct);
@@ -3005,7 +3014,7 @@ thread_base::native_entry thread_base::finalize(u64 _self) noexcept
 #ifdef _WIN32
 	_endthreadex(0);
 #else
-	pthread_exit(nullptr);
+	thread_exit_native();
 #endif
 
 	return nullptr;
@@ -3536,7 +3545,7 @@ void thread_ctrl::set_name(std::string name)
 #ifdef _WIN32
 		_endthreadex(0);
 #else
-		pthread_exit(nullptr);
+		thread_exit_native();
 #endif
 	}
 
@@ -3563,7 +3572,7 @@ void thread_ctrl::silent_exit() noexcept
 #ifdef _WIN32
 	_endthreadex(0);
 #else
-	pthread_exit(nullptr);
+	thread_exit_native();
 #endif
 
 	std::abort();
