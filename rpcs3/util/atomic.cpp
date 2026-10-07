@@ -191,23 +191,28 @@ namespace
 		un_t<std::mutex> mtx;
 #endif
 
-		void init(uptr iptr)
+		static u64 current_tid()
 		{
 #ifdef _WIN32
-			tid = GetCurrentThreadId();
+			return GetCurrentThreadId();
 #elif defined(ANDROID)
-			tid = pthread_gettid_np(pthread_self());
+			return pthread_gettid_np(pthread_self());
 #elif defined(__linux__)
-			tid = syscall(SYS_gettid);
+			return syscall(SYS_gettid);
 #elif defined(__APPLE__)
 			u64 tid_temp{};
 			pthread_threadid_np(nullptr, &tid_temp);
-			tid = tid_temp; // Use a temporary for extra safety
+			return tid_temp; // Use a temporary for extra safety
 #elif defined(__FreeBSD__)
-			tid = pthread_getthreadid_np();
+			return pthread_getthreadid_np();
 #else
-			tid = pthread_self();
+			return reinterpret_cast<u64>(pthread_self());
 #endif
+		}
+
+		void init(uptr iptr)
+		{
+			tid = current_tid();
 
 #ifdef USE_STD
 			cv.init(cv);
@@ -298,6 +303,15 @@ namespace
 			// Use "wake all" arg for robustness, only 1 thread is expected
 			futex(&sync, FUTEX_WAKE_PRIVATE, 0x7fff'ffff);
 #elif defined(USE_STD)
+			// The waiter holds mtx while it re-checks its condition, and that check can notify
+			// its own slot: it is awake then, so skip the lock (an error-checking mutex, as on
+			// the PS5, throws on a recursive lock; elsewhere it would deadlock)
+			if (tid == current_tid())
+			{
+				cv->notify_all();
+				return;
+			}
+
 			// Not super efficient: locking is required to avoid lost notifications
 			mtx->lock();
 			mtx->unlock();

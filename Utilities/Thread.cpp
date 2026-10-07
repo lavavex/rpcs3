@@ -2763,6 +2763,11 @@ const bool s_exception_handler_set = []() -> bool
 
 #endif
 
+#ifdef __PROSPERO__
+std::string describe_current_exception();
+std::string describe_current_stack();
+#endif
+
 const bool s_terminate_handler_set = []() -> bool
 {
 	std::set_terminate([]()
@@ -2773,7 +2778,16 @@ const bool s_terminate_handler_set = []() -> bool
 			utils::trap();
 		}
 
-		report_fatal_error("RPCS3 has abnormally terminated.");
+#ifdef __PROSPERO__
+		// Name the exception that reached std::terminate, when there is one
+		std::string reason = describe_current_exception();
+		if (!reason.empty()) reason.insert(0, "\n");
+		reason += "\n" + describe_current_stack();
+#else
+		const std::string reason;
+#endif
+
+		report_fatal_error("RPCS3 has abnormally terminated." + reason);
 	});
 
 	return true;
