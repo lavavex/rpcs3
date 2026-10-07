@@ -20,6 +20,8 @@
 #include "Emu/system_config.h"
 #include "Emu/system_utils.hpp"
 #include "Emu/system_progress.hpp"
+#include "Emu/localized_string_id.h"
+#include "Emu/RSX/Overlays/overlay_utils.h"
 #include "Emu/IdManager.h"
 #include "Emu/VFS.h"
 #include "Emu/Audio/Null/NullAudioBackend.h"
@@ -177,6 +179,30 @@ namespace
 		g_cfg_input.save("", "");
 	}
 
+	// RPCS3's on-screen text, in English: the Qt frontend's table (rpcs3qt/localized_emu.h),
+	// generated without Qt into ps5_localized_strings.inc by ps5/tools/gen_localized.py
+	std::string localized(localized_string_id id, const char* args)
+	{
+		static const std::unordered_map<localized_string_id, std::string_view> s_strings =
+		{
+#include "ps5_localized_strings.inc"
+		};
+
+		const auto it = s_strings.find(id);
+		if (it == s_strings.end())
+		{
+			return {};
+		}
+
+		// Qt's %0 placeholder takes the one argument RPCS3 passes
+		std::string text(it->second);
+		if (const usz pos = text.find("%0"); pos != umax)
+		{
+			text.replace(pos, 2, args ? args : "");
+		}
+		return text;
+	}
+
 	void create_callbacks()
 	{
 		g_emu_callbacks.call_from_main_thread = [](std::function<void()> func, atomic_t<u32>* wake_up)
@@ -312,8 +338,8 @@ namespace
 		g_emu_callbacks.on_missing_fw = []() { sys_log.error("Missing firmware: put PS3UPDAT.PUP in %s", data_dir); };
 		g_emu_callbacks.handle_taskbar_progress = [](s32, s32) {};
 
-		g_emu_callbacks.get_localized_string    = [](localized_string_id, const char*) -> std::string { return {}; };
-		g_emu_callbacks.get_localized_u32string = [](localized_string_id, const char*) -> std::u32string { return {}; };
+		g_emu_callbacks.get_localized_string    = [](localized_string_id id, const char* args) -> std::string { return localized(id, args); };
+		g_emu_callbacks.get_localized_u32string = [](localized_string_id id, const char* args) -> std::u32string { return utf8_to_u32string(localized(id, args)); };
 		g_emu_callbacks.get_localized_setting   = [](const cfg::_base*, u32) -> std::string { return {}; };
 
 		g_emu_callbacks.play_sound = [](const std::string&, std::optional<f32>) {};
