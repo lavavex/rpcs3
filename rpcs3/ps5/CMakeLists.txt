@@ -37,6 +37,9 @@ target_link_options(rpcs3_ps5 PRIVATE
     -Wl,--defsym=strsignal=ps5_strsignal
     -Wl,--defsym=syscall=ps5_syscall
     -Wl,--defsym=times=ps5_times
+    # Threads are the platform layer's (radv-link.sh wraps pthread_create): they end through
+    # its pthread_exit, which runs thread_local destructors before libkernel's key destructors
+    -Wl,--defsym=pthread_exit=ps5_pthread_exit
     -Wl,--defsym=fchown=ps5_fchown
     -Wl,--defsym=fork=ps5_fork
     -Wl,--defsym=fstatfs=ps5_fstatfs

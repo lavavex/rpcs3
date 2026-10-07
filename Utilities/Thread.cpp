@@ -2609,6 +2609,15 @@ static void signal_handler(int /*sig*/, siginfo_t* info, void* uct) noexcept
 
 	std::string msg = fmt::format("Segfault %s location %p at %p.\n", cause, info->si_addr, RIP(context));
 
+#ifdef __PROSPERO__
+	{
+		// No debugger on the console: klogsrv shows the kernel's backtrace of the fault, and the
+		// anchor's link address maps it to the image (the load base)
+		const uptr anchor = reinterpret_cast<uptr>(&signal_handler);
+		fmt::append(msg, "PS5 context: rip=%p rsp=%p rbp=%p anchor(signal_handler)=%p\n", RIP(context), RSP(context), *X64REG(context, 5), anchor);
+	}
+#endif
+
 	if (vm::try_get_addr(info->si_addr).second)
 	{
 		fmt::append(msg, "Sudo Addr: %p, VM Addr: %p\n", vm::g_sudo_addr, vm::g_base_addr);
