@@ -19,6 +19,7 @@
 #include "Emu/System.h"
 #include "Emu/system_config.h"
 #include "Emu/system_utils.hpp"
+#include "Emu/system_progress.hpp"
 #include "Emu/IdManager.h"
 #include "Emu/VFS.h"
 #include "Emu/Audio/Null/NullAudioBackend.h"
@@ -524,13 +525,59 @@ int main(int /*argc*/, char** /*argv*/)
 		}
 	});
 
+	// Boot progress (PPU/SPU compilation): RPCS3's own dialog needs a renderer that draws,
+	// which there is not yet; report its progress counters as system notifications instead
+	ps5_msg_dialog progress;
+	bool progress_open = false;
+	u32 progress_limit = 0;
+
+	const auto report_progress = [&]()
+	{
+		const std::string text = g_progr_text;
+		const u32 total = g_progr_ptotal + g_progr_ftotal;
+		const u32 done = g_progr_pdone + g_progr_fdone;
+
+		if (text.empty() && !total)
+		{
+			progress_open = false;
+			return;
+		}
+
+		if (!progress_open)
+		{
+			progress_open = true;
+			progress.Create(text.empty() ? "Compiling" : text);
+		}
+		else if (!text.empty())
+		{
+			progress.SetMsg(text);
+		}
+
+		if (total != progress_limit)
+		{
+			progress_limit = total;
+			progress.ProgressBarSetLimit(0, total);
+		}
+
+		progress.ProgressBarSetValue(0, done);
+	};
+
 	// The main thread: run what RPCS3 posts until emulation ends
 	while (true)
 	{
 		std::pair<std::function<void()>, atomic_t<u32>*> item;
 		{
 			std::unique_lock lock(s_main_queue.mutex);
-			s_main_queue.cv.wait(lock, [] { return s_main_queue.quit || !s_main_queue.items.empty(); });
+
+			while (!s_main_queue.quit && s_main_queue.items.empty())
+			{
+				if (s_main_queue.cv.wait_for(lock, 1s) == std::cv_status::timeout)
+				{
+					lock.unlock();
+					report_progress();
+					lock.lock();
+				}
+			}
 
 			if (s_main_queue.items.empty())
 			{
