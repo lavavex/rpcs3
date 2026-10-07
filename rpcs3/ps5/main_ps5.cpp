@@ -152,19 +152,20 @@ namespace
 	}
 
 	// Players 1-4: the signed-in users' DualSenses, unless the user configured something else
-	void ensure_input_config(std::string_view title_id)
+	void ensure_input_config(std::string_view /*title_id*/)
 	{
-		if (g_cfg_input.load(std::string(title_id), "", true))
+		// RPCS3 falls back to the default profile (input_configs/global/Default.yml) when a game
+		// has no configuration of its own: on the PS5 it maps players 1-4 to ScePad
+		const std::string default_profile = rpcs3::utils::get_input_config_dir() + g_cfg_input_configs.default_config + ".yml";
+
+		if (fs::is_file(default_profile))
 		{
 			return;
 		}
 
-		if (g_cfg_input.load("", "", true))
-		{
-			return;
-		}
+		sys_log.notice("No input configuration: players 1-4 use ScePad (%s)", default_profile);
 
-		sys_log.notice("No input configuration: players 1-4 use ScePad");
+		g_cfg_input.from_default();
 
 		for (u32 i = 0; i < 4; i++)
 		{
@@ -176,7 +177,7 @@ namespace
 			handler.init_config(&player->config);
 		}
 
-		g_cfg_input.save("", "");
+		g_cfg_input.save("", g_cfg_input_configs.default_config);
 	}
 
 	// RPCS3's on-screen text, in English: the Qt frontend's table (rpcs3qt/localized_emu.h),
