@@ -1617,18 +1617,28 @@ bool handle_access_violation(u32 addr, bool is_writing, bool is_exec, ucontext_t
 #ifdef __PROSPERO__
 	// The title's own code and the system modules are execute-only on the PS5: reading the
 	// faulting instruction there faults again and kills the process. Only JIT code is readable.
+	// The decoded instruction is needed only to emulate RawSPU MMIO below; any other fault
+	// (such as a write to memory the texture cache protects) goes on to the generic handling.
+	bool code_readable = true;
 	{
 		void* start = nullptr;
 		void* end = nullptr;
 		u32 prot = 0;
 		if (::sceKernelQueryMemoryProtection(const_cast<u8*>(code), &start, &end, &prot) != 0 || !(prot & 0x1))
 		{
-			sig_log.error("Access violation at 0x%x from execute-only code at %p: cannot decode the instruction", addr, code);
-			return false;
+			code_readable = false;
 		}
 	}
-#endif
 
+	if (!code_readable && addr - RAW_SPU_BASE_ADDR < (6 * RAW_SPU_OFFSET) && (addr % RAW_SPU_OFFSET) >= RAW_SPU_PROB_OFFSET)
+	{
+		sig_log.error("RawSPU MMIO access at 0x%x from execute-only code at %p: cannot decode the instruction", addr, code);
+		return false;
+	}
+
+	if (code_readable)
+#endif
+	{
 	x64_op_t op;
 	x64_reg_t reg;
 	usz d_size;
@@ -1853,6 +1863,7 @@ bool handle_access_violation(u32 addr, bool is_writing, bool is_exec, ucontext_t
 		g_tls_fault_spu++;
 		return true;
 	} while (0);
+	}
 #elif defined(ARCH_ARM64)
 	const u8* const code = reinterpret_cast<u8*>(RIP(context));
 
