@@ -8,6 +8,7 @@
 #include "stdafx.h"
 
 #include "ps5_audio_backend.h"
+#include "ps5_dialogs.h"
 #include "ps5_firmware.h"
 #include "ps5_frame.h"
 #include "ps5_pad_handler.h"
@@ -330,11 +331,12 @@ namespace
 		g_emu_callbacks.get_camera_handler = []() -> std::shared_ptr<camera_handler_base> { return std::make_shared<null_camera_handler>(); };
 		g_emu_callbacks.get_music_handler  = []() -> std::shared_ptr<music_handler_base> { return std::make_shared<null_music_handler>(); };
 
-		// Dialogs: RPCS3's native overlays draw them; nothing comes from the frontend
+		// Dialogs: RPCS3's native overlays draw them. Message and keyboard dialogs pick the
+		// overlay themselves; the save list and trophy pop-ups go through these callbacks
 		g_emu_callbacks.get_msg_dialog                 = []() -> std::shared_ptr<MsgDialogBase> { return {}; };
 		g_emu_callbacks.get_osk_dialog                 = []() -> std::shared_ptr<OskDialogBase> { return {}; };
-		g_emu_callbacks.get_save_dialog                = []() -> std::unique_ptr<SaveDialogBase> { return {}; };
-		g_emu_callbacks.get_trophy_notification_dialog = []() -> std::unique_ptr<TrophyNotificationBase> { return {}; };
+		g_emu_callbacks.get_save_dialog                = []() -> std::unique_ptr<SaveDialogBase> { return std::make_unique<ps5_save_dialog>(); };
+		g_emu_callbacks.get_trophy_notification_dialog = []() -> std::unique_ptr<TrophyNotificationBase> { return std::make_unique<ps5_trophy_notification>(); };
 
 		g_emu_callbacks.on_run    = [](bool) {};
 		g_emu_callbacks.on_pause  = []() {};

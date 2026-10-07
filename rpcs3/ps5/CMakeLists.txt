@@ -2,6 +2,7 @@
 add_executable(rpcs3_ps5
     main_ps5.cpp
     ps5_audio_backend.cpp
+    ps5_dialogs.cpp
     ps5_firmware.cpp
     ps5_dl.cpp
     ps5_libc_compat.c
