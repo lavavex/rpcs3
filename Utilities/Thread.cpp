@@ -1548,6 +1548,10 @@ namespace rsx
 	extern std::function<bool(u32 addr, bool is_writing)> g_access_violation_handler;
 }
 
+#ifdef __PROSPERO__
+extern "C" int sceKernelQueryMemoryProtection(void* address, void** start, void** end, u32* protection);
+#endif
+
 bool handle_access_violation(u32 addr, bool is_writing, bool is_exec, ucontext_t* context) noexcept
 {
 	g_tls_fault_all++;
@@ -1609,6 +1613,21 @@ bool handle_access_violation(u32 addr, bool is_writing, bool is_exec, ucontext_t
 
 #if defined(ARCH_X64)
 	const u8* const code = reinterpret_cast<u8*>(RIP(context));
+
+#ifdef __PROSPERO__
+	// The title's own code and the system modules are execute-only on the PS5: reading the
+	// faulting instruction there faults again and kills the process. Only JIT code is readable.
+	{
+		void* start = nullptr;
+		void* end = nullptr;
+		u32 prot = 0;
+		if (::sceKernelQueryMemoryProtection(const_cast<u8*>(code), &start, &end, &prot) != 0 || !(prot & 0x1))
+		{
+			sig_log.error("Access violation at 0x%x from execute-only code at %p: cannot decode the instruction", addr, code);
+			return false;
+		}
+	}
+#endif
 
 	x64_op_t op;
 	x64_reg_t reg;

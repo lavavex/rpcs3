@@ -3,6 +3,7 @@ add_executable(rpcs3_ps5
     main_ps5.cpp
     ps5_audio_backend.cpp
     ps5_firmware.cpp
+    ps5_dl.cpp
     ps5_libc_compat.c
     ps5_pad_handler.cpp
     ../Input/mouse_gyro_handler.cpp
