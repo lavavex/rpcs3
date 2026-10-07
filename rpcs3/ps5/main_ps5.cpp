@@ -49,6 +49,7 @@
 
 #include <condition_variable>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <ctime>
 #include <deque>
 #include <mutex>
@@ -443,6 +444,9 @@ int main(int /*argc*/, char** /*argv*/)
 
 	// Files the title writes under /data stay editable over FTP (another user)
 	::umask(0);
+
+	// RPCS3 opens some resources by relative path (Icons/ui/...): they are beside the eboot
+	::chdir("/app0/");
 	sceSystemServiceHideSplashScreen();
 	sceUserServiceInitialize(nullptr);
 
