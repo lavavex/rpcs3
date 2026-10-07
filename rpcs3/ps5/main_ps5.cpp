@@ -48,6 +48,7 @@
 #include <volk.h>
 
 #include <condition_variable>
+#include <sys/stat.h>
 #include <ctime>
 #include <deque>
 #include <mutex>
@@ -439,6 +440,9 @@ void qt_events_aware_op(int repeat_duration_ms, std::function<bool()> wrapped_op
 int main(int /*argc*/, char** /*argv*/)
 {
 	ps5_klog_capture_stderr("[RPCS3] ");
+
+	// Files the title writes under /data stay editable over FTP (another user)
+	::umask(0);
 	sceSystemServiceHideSplashScreen();
 	sceUserServiceInitialize(nullptr);
 
@@ -480,6 +484,15 @@ int main(int /*argc*/, char** /*argv*/)
 	Emu.Init();
 
 	apply_ps5_defaults();
+
+	// Vulkan is the only real renderer on the PS5: a config that says Null (an early build wrote
+	// that default) is moved to Vulkan once
+	if (g_cfg.video.renderer == video_renderer::null)
+	{
+		g_cfg.video.renderer.set(video_renderer::vulkan);
+		Emulator::SaveSettings(g_cfg.to_string(), "");
+		sys_log.warning("Renderer was Null: set to Vulkan");
+	}
 
 	// Firmware: install it once from /data/rpcs3/PS3UPDAT.PUP
 	if (std::string fw = utils::get_firmware_version(); fw.empty())
