@@ -437,6 +437,29 @@ namespace
 		return text;
 	}
 
+	// Copies a folder's files and subfolders (resources the title ships beside its eboot)
+	void copy_tree(const std::string& from, const std::string& to)
+	{
+		fs::create_path(to);
+
+		for (const auto& entry : fs::dir(from))
+		{
+			if (entry.name == "." || entry.name == "..")
+			{
+				continue;
+			}
+
+			if (entry.is_directory)
+			{
+				copy_tree(from + "/" + entry.name, to + "/" + entry.name);
+			}
+			else
+			{
+				fs::copy_file(from + "/" + entry.name, to + "/" + entry.name, false);
+			}
+		}
+	}
+
 	// Defaults for the PS5 the first time (a user's config.yml keeps its own choices)
 	void apply_ps5_defaults()
 	{
@@ -539,6 +562,14 @@ int main(int /*argc*/, char** /*argv*/)
 	Emu.Init();
 
 	apply_ps5_defaults();
+
+	// RPCS3's overlays load their images from <config dir>/Icons (the relative fallback needs a
+	// working directory the title cannot set): copy the ones packaged with the title once
+	if (!fs::is_file(std::string(data_dir) + "Icons/ui/cross.png") && fs::is_dir("/app0/Icons"))
+	{
+		copy_tree("/app0/Icons", std::string(data_dir) + "Icons");
+		sys_log.notice("Copied overlay icons to %sIcons", data_dir);
+	}
 
 	// Vulkan is the only real renderer on the PS5: a config that says Null (an early build wrote
 	// that default) is moved to Vulkan once. Auto-exit stays on: Big Picture Mode's Exit closes
