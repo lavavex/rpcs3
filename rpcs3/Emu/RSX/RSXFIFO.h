@@ -133,6 +133,7 @@ namespace rsx
 			RsxDmaControl* m_ctrl = nullptr;
 			const rsx::rsx_iomap_table* m_iotable;
 			u32 m_local_fifo_size = 0; // The local memory size when the command buffer is there
+			u32 m_local_fifo_asked = 0; // The local memory size when the system mode asks for that
 			u32 m_fifo_pos = 0;
 
 			u32 m_memwatch_addr = 0;
@@ -153,6 +154,7 @@ namespace rsx
 			~FIFO_control() = default;
 
 			u32 translate_address(u32 addr) const;
+			void choose_command_memory(u32 get);
 
 			std::pair<bool, u32> fetch_u32(u32 addr);
 			void invalidate_cache() { m_cache_size = 0; }

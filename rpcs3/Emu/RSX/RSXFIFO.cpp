@@ -30,7 +30,23 @@ namespace rsx
 
 			if (pctrl->driver_info && vm::_ref<RsxDriverInfo>(pctrl->driver_info).systemModeFlags & SYS_RSX_SYSTEM_MODE_LOCAL_FIFO)
 			{
-				m_local_fifo_size = pctrl->local_mem_size;
+				m_local_fifo_asked = m_local_fifo_size = pctrl->local_mem_size;
+			}
+		}
+
+		// When the FIFO is set up (sys_rsx_context_attribute 0x001): a system mode
+		// that asks for a FIFO in local memory gets one unless GET is already IO
+		// mapped. GTA IV 1.00 (0x210) maps no IO memory before setting up its FIFO;
+		// Everybody's Golf (0x200) maps its command buffer at IO offset 0 first; read
+		// from local memory, its commands were all NOPs and its libgcm waited for a
+		// SET_REFERENCE forever.
+		void FIFO_control::choose_command_memory(u32 get)
+		{
+			m_local_fifo_size = m_local_fifo_asked && m_iotable->get_addr(get) == umax ? m_local_fifo_asked : 0;
+
+			if (m_local_fifo_asked)
+			{
+				rsx_log.notice("FIFO command buffer in %s memory (GET 0x%x)", m_local_fifo_size ? "local" : "IO", get);
 			}
 		}
 

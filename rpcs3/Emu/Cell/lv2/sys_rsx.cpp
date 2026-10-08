@@ -693,6 +693,7 @@ error_code sys_rsx_context_attribute(u32 context_id, u32 package_id, u64 a3, u64
 		const u64 get_put = put << 32 | get;
 
 		std::lock_guard lock(render->sys_rsx_mtx);
+		render->fifo_ctrl->choose_command_memory(static_cast<u32>(get));
 		set_rsx_dmactl(render, get_put);
 		break;
 	}
