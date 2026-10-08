@@ -34,7 +34,7 @@ namespace rsx
 			}
 		}
 
-		// When the FIFO is set up (sys_rsx_context_attribute 0x001): a system mode
+		// When the game sets GET and PUT (set_rsx_dmactl, with the RSX paused): a system mode
 		// that asks for a FIFO in local memory gets one unless GET is already IO
 		// mapped. GTA IV 1.00 (0x210) maps no IO memory before setting up its FIFO;
 		// Everybody's Golf (0x200) maps its command buffer at IO offset 0 first; read
