@@ -74,6 +74,51 @@ void spu_llvm_set_compile_context(spu_llvm_compile_context* context) noexcept
 }
 #endif
 
+// An insertelement at a lane only known at run time: x86 makes it through the
+// stack (the vector stored, the element stored over it, the vector loaded
+// back), and a 16-byte load of a narrower store is not forwarded, so the load
+// waits for both stores to reach the cache. SPU code inserting at a computed
+// lane (the CWD, CBD, CHD and CDD masks and the SHUFB they feed, a scalar store
+// into a quadword) spent about half of GTA IV's hottest function there. A
+// compare with the lane numbers and a select stay in registers; an index out
+// of range leaves the vector as it was rather than making it poison.
+static void spu_replace_variable_inserts(llvm::Function& f)
+{
+	std::vector<llvm::InsertElementInst*> work;
+
+	for (auto& bb : f)
+	{
+		for (auto& inst : bb)
+		{
+			if (auto ie = llvm::dyn_cast<llvm::InsertElementInst>(&inst);
+				ie && !llvm::isa<llvm::Constant>(ie->getOperand(2)) && llvm::isa<llvm::FixedVectorType>(ie->getType()))
+			{
+				work.push_back(ie);
+			}
+		}
+	}
+
+	for (const auto ie : work)
+	{
+		llvm::IRBuilder<> ir(ie);
+		const auto vt = llvm::cast<llvm::FixedVectorType>(ie->getType());
+		const u32 lanes = vt->getNumElements();
+		const auto lane_type = llvm::IntegerType::get(f.getContext(), vt->getElementType()->getPrimitiveSizeInBits());
+
+		std::vector<llvm::Constant*> numbers;
+		for (u32 i = 0; i < lanes; i++)
+		{
+			numbers.push_back(llvm::ConstantInt::get(lane_type, i));
+		}
+
+		const auto index = ir.CreateZExtOrTrunc(ie->getOperand(2), lane_type);
+		const auto hit = ir.CreateICmpEQ(llvm::ConstantVector::get(numbers), ir.CreateVectorSplat(lanes, index));
+		const auto result = ir.CreateSelect(hit, ir.CreateVectorSplat(lanes, ie->getOperand(1)), ie->getOperand(0));
+		ie->replaceAllUsesWith(result);
+		ie->eraseFromParent();
+	}
+}
+
 class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 {
 	// JIT Instance
@@ -4319,6 +4364,12 @@ public:
 		pb.registerFunctionAnalyses(fam);
 		pb.registerLoopAnalyses(lam);
 		pb.crossRegisterProxies(lam, fam, cgam, mam);
+
+		// Variable-index inserts first (spu_replace_variable_inserts)
+		for (const auto& func : m_functions)
+		{
+			spu_replace_variable_inserts(func.second.fn ? *func.second.fn : *func.second.chunk);
+		}
 
 		FunctionPassManager fpm;
 		// Basic optimizations
