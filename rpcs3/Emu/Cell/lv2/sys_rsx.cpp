@@ -111,6 +111,10 @@ static void set_rsx_dmactl(rsx::thread* render, u64 get_put)
 		rsx::eng_lock rlock(render);
 		render->fifo_ctrl->abort();
 
+		// Here, with the RSX paused: its FIFO_control is made when its thread
+		// starts, which can be after the FIFO is set up (GTA IV)
+		render->fifo_ctrl->choose_command_memory(static_cast<u32>(get_put));
+
 		// Unconditional set
 		while (!render->new_get_put.compare_and_swap_test(u64{umax}, get_put))
 		{
