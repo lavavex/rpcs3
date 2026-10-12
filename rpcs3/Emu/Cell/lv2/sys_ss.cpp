@@ -12,6 +12,10 @@
 #include <shared_mutex>
 #include <unordered_set>
 
+#ifdef __PROSPERO__
+#include <ps5platform/libc.h>
+#endif
+
 #ifdef _WIN32
 #include <Windows.h>
 #include <bcrypt.h>
@@ -142,6 +146,10 @@ error_code sys_ss_random_number_generator(u64 pkg_id, vm::ptr<void> buf, u64 siz
 	{
 		fmt::throw_exception("sys_ss_random_number_generator(): BCryptGenRandom failed (0x%08x)", ret);
 	}
+#elif defined(__PROSPERO__)
+	// A PS5 title cannot open /dev/urandom (ENOTTY) and does not load libSceRandom:
+	// the platform layer's generator, seeded from the timestamp counter, fills it.
+	ps5_arc4random_buf(temp.get(), static_cast<usz>(size));
 #else
 	fs::file rnd{"/dev/urandom"};
 
