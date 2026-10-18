@@ -244,14 +244,19 @@ static bool is_optical_device_node(const struct ::stat& file_info)
 	return parent_info.st_dev != file_info.st_dev;
 }
 
-// Retrieve the size of a raw device: "fstat()" reports no size (0) on such a device
-static u64 get_raw_device_size(int fd)
+// Retrieve the size of a raw device: "fstat()" reports no size (0) on such a device.
+// Distinguish an unsupported size ioctl from an optical drive with no media.
+static u64 get_raw_device_size(int fd, bool& size_unsupported)
 {
+	size_unsupported = false;
+
 #if defined(__linux__)
 	if (u64 size = 0; ::ioctl(fd, BLKGETSIZE64, &size) == 0)
 	{
 		return size;
 	}
+
+	size_unsupported = errno == ENOTTY;
 #elif defined(__APPLE__)
 	u64 block_count = 0;
 	u32 block_size = 0;
@@ -265,11 +270,15 @@ static u64 get_raw_device_size(int fd)
 
 		return block_count * block_size;
 	}
+
+	size_unsupported = errno == ENOTTY;
 #elif defined(__FreeBSD__) || defined(__DragonFly__)
 	if (off_t media_size = 0; ::ioctl(fd, DIOCGMEDIASIZE, &media_size) == 0)
 	{
 		return static_cast<u64>(media_size);
 	}
+
+	size_unsupported = errno == ENOTTY;
 #endif
 
 	// Fallback: seek to the end of the device (restoring the current position afterwards)
@@ -2113,18 +2122,23 @@ fs::file::file(const std::string& path, bs_t<open_mode> mode)
 	// If path points to an optical raw device, complete the file opening
 	if (raw_device)
 	{
-		// Try to retrieve the size of the content. If it fails, no disc is probably mounted so abort the file opening
-		const u64 raw_device_size = get_raw_device_size(fd);
+		bool size_unsupported = false;
+		const u64 raw_device_size = get_raw_device_size(fd, size_unsupported);
 
-		if (!raw_device_size)
+		if (raw_device_size)
+		{
+			m_file = std::make_unique<unix_file>(fd, raw_device_size);
+			return;
+		}
+
+		// BSD/macOS device-node checks also match character devices such as /dev/urandom.
+		// ENOTTY means this is not a sized raw device; open it normally instead.
+		if (!size_unsupported)
 		{
 			::close(fd);
 			g_tls_error = fs::error::noent;
 			return;
 		}
-
-		m_file = std::make_unique<unix_file>(fd, raw_device_size);
-		return;
 	}
 
 	m_file = std::make_unique<unix_file>(fd);
