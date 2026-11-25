@@ -465,6 +465,32 @@ namespace
 		return text;
 	}
 
+	// Opens a folder tree to the FTP server (another user): folders 0777, files 0666. Earlier builds
+	// created /data/rpcs3 as 0755/0644, which only the title itself could write to.
+	void make_writable(const std::string& path)
+	{
+		::chmod(path.c_str(), 0777);
+
+		for (const auto& entry : fs::dir(path))
+		{
+			if (entry.name == "." || entry.name == "..")
+			{
+				continue;
+			}
+
+			const std::string child = path + "/" + entry.name;
+
+			if (entry.is_directory)
+			{
+				make_writable(child);
+			}
+			else
+			{
+				::chmod(child.c_str(), 0666);
+			}
+		}
+	}
+
 	// Copies a folder's files and subfolders (resources the title ships beside its eboot)
 	void copy_tree(const std::string& from, const std::string& to)
 	{
@@ -597,6 +623,12 @@ int main(int /*argc*/, char** /*argv*/)
 	g_android_cache_dir = std::string(data_dir) + "cache/";
 	fs::create_path(g_android_config_dir);
 	fs::create_path(g_android_cache_dir);
+
+	// Once: repair the permissions of a data folder an earlier build created (new ones are 0777)
+	if (struct stat st{}; ::stat(g_android_config_dir.c_str(), &st) == 0 && (st.st_mode & 0777) != 0777)
+	{
+		make_writable(std::string(data_dir.substr(0, data_dir.size() - 1)));
+	}
 
 	ensure(thread_ctrl::is_main(), "Not main thread");
 
