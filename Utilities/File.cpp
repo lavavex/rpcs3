@@ -1496,7 +1496,12 @@ bool fs::create_dir(const std::string& path)
 
 	return true;
 #else
+#ifdef __PROSPERO__
+	// PS5: the FTP server runs as another user, so folders stay writable to everyone (the title sets umask 0)
+	if (::mkdir(path.c_str(), S_IRWXU | S_IRWXG | S_IRWXO) != 0)
+#else
 	if (::mkdir(path.c_str(), S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH) != 0)
+#endif
 	{
 		g_tls_error = to_error(errno);
 		return false;
@@ -2073,7 +2078,12 @@ fs::file::file(const std::string& path, bs_t<open_mode> mode)
 	if (mode & fs::trunc && !(mode & fs::lock)) flags |= O_TRUNC;
 	if (mode & fs::excl) flags |= O_EXCL;
 
+#ifdef __PROSPERO__
+	// PS5: files stay writable to the FTP server (another user), as folders do in create_dir
+	int perm = S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH;
+#else
 	int perm = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
+#endif
 
 	if (mode & fs::write && mode & fs::unread)
 	{
